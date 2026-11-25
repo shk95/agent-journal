@@ -10,6 +10,8 @@ import unicodedata
 import uuid
 from pathlib import Path
 
+from .graph import layout
+
 STATE = {
     "inProgress": "In progress",
     "completed": "Completed",
@@ -42,6 +44,64 @@ def write(win, y, x, text, width, style=0):
         win.addstr(y, x, fit(str(text), width), style)
     except curses.error:
         pass
+
+
+def terminal_palette():
+    if not curses.has_colors():
+        return []
+    try:
+        curses.use_default_colors()
+    except curses.error:
+        return []
+    if os.environ.get("NO_COLOR"):
+        return []
+    colors = (
+        curses.COLOR_GREEN,
+        curses.COLOR_MAGENTA,
+        curses.COLOR_CYAN,
+        curses.COLOR_BLUE,
+        curses.COLOR_RED,
+    )
+    palette = []
+    for pair, color in enumerate(colors[: curses.COLOR_PAIRS - 1], 1):
+        if color < curses.COLORS:
+            try:
+                curses.init_pair(pair, color, -1)
+            except curses.error:
+                return []
+            palette.append(curses.color_pair(pair))
+    return palette
+
+
+def lane_style(lane, palette):
+    return palette[lane % len(palette)] if palette else 0
+
+
+def draw_session_graph(win, y, graph, palette, lanes, step, overflow):
+    if not lanes:
+        return
+    point, tracks, forks = graph["lane"], graph["tracks"], graph["forks"]
+    left, right = min([point, *forks]), max([point, *forks])
+    if left < right and left < lanes:
+        span = (min(right, lanes - 1) - left) * step + 1
+        write(win, y, 1 + left * step, "─" * span, span, lane_style(point, palette))
+    for lane, _, above, below in tracks:
+        if lane >= lanes:
+            continue
+        x = 1 + lane * step
+        style = lane_style(lane, palette)
+        if lane == point:
+            write(win, y, x, "●", 1, style | curses.A_BOLD)
+        elif lane in forks:
+            corner = "┌" if lane == left else "┐" if lane == right else "┬"
+            write(win, y, x, corner, 1, style)
+        elif above and below:
+            # A vertical rail breaks a crossing branch without creating a junction.
+            write(win, y, x, "│", 1, style)
+        if below:
+            write(win, y + 1, x, "│", 1, style)
+    if overflow and any(lane >= lanes for lane, _, _, _ in tracks):
+        write(win, y, lanes + 1, "…", 1, curses.A_BOLD)
 
 
 def draw_buttons(win, y, width, options, hits, active=()):
@@ -161,6 +221,7 @@ def edit_body(win, body):
 
 
 def show(win, api, project, mouse):
+    palette = terminal_palette()
     try:
         curses.curs_set(0)
     except curses.error:
@@ -168,7 +229,8 @@ def show(win, api, project, mouse):
     if mouse:
         curses.mousemask(CLICK | (WHEEL_UP | WHEEL_DOWN if WHEEL_DOWN else 0))
     win.timeout(300)
-    turns, notes, selected, detail = [], [], None, None
+    turns, graphs, notes = [], [], []
+    selected, detail = None, None
     offset, last, message = 0, 0, ""
     top, project_offset = 0, 0
     visible = [True, True, True]
@@ -177,10 +239,18 @@ def show(win, api, project, mouse):
         if detail is None and time.monotonic() - last >= 3:
             try:
                 batch = api.request(
-                    "journey", project=project, limit=PAGE_SIZE + 1, before=before
+                    "journey",
+                    project=project,
+                    limit=PAGE_SIZE + 1,
+                    before=before,
+                    lanes="true",
                 )
                 has_older = len(batch) > PAGE_SIZE
                 turns = batch[-PAGE_SIZE:]
+                if batch and "graph_lanes" not in batch[0]:
+                    graphs = list(layout(batch))[-PAGE_SIZE:]
+                else:
+                    graphs = [row["graph_lanes"] for row in turns]
                 notes = api.request("notes", project=project)
                 message = ""
             except (OSError, RuntimeError) as e:
@@ -245,26 +315,42 @@ def show(win, api, project, mouse):
                     y = 3 + 2 * i
                     write(win, y, second, n["body"], w - second - 1)
                     project_rows[y] = n
-            graph_width = min(
-                max(0, (split - 14) // 2),
-                max((len(r["graph"]) for r in turns), default=0),
+            lane_count = max(
+                (lane + 1 for item in graphs for lane, _, _, _ in item["tracks"]),
+                default=0,
             )
+            room = max(0, min(split - 8, split // 2))
+            step = 2 if 2 * lane_count - 1 <= room else 1
+            overflow = 0 < room < lane_count
+            lanes = min(lane_count, room - overflow)
+            graph_width = max(0, (lanes - 1) * step + 1) + overflow
+            text_x = 2 + graph_width
             for i, r in enumerate(turns[top : top + height]):
                 y = 3 + 2 * i
                 focused = top + i == idx
                 pointer = ">" if focused else " "
                 style = curses.A_REVERSE if focused else 0
-                marker = r["graph"][:graph_width].ljust(graph_width)
-                write(
-                    win,
-                    y,
-                    0,
-                    f"{pointer}{marker} {r['thread'][-5:]}  {r['prompt']}",
-                    split - 1,
-                    style,
-                )
-                status = OBSERVATION.get(r.get("observation"), STATE[r["status"]])
-                write(win, y + 1, 2, f"{status} · {r['summary']}", split - 3)
+                if visible[0]:
+                    write(win, y, 0, pointer, 1, curses.A_BOLD)
+                    draw_session_graph(
+                        win, y, graphs[top + i], palette, lanes, step, overflow
+                    )
+                    write(
+                        win,
+                        y,
+                        text_x,
+                        f"{r['thread'][-5:]}  {r['prompt']}",
+                        split - text_x - 1,
+                        style,
+                    )
+                    status = OBSERVATION.get(r.get("observation"), STATE[r["status"]])
+                    write(
+                        win,
+                        y + 1,
+                        text_x,
+                        f"{status} · {r['summary']}",
+                        split - text_x - 1,
+                    )
                 attached = [
                     n
                     for n in notes

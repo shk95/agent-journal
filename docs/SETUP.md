@@ -71,6 +71,8 @@ agent-journal
 - Use `e` to select a note and open it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
 - Click a turn to select it, a note to edit it, or a bracketed control to run its action. Scroll over the Journey, Project notes, or an open transcript with the wheel where the terminal and curses support it.
 
+The Journey graph connects turns from each session through the request and summary lines. The TUI uses your terminal's default foreground and background and its ANSI palette for session lanes. Set `NO_COLOR=1` to draw the lanes in the default foreground color.
+
 Mouse input is enabled by default. In tmux, enable forwarding with `set -g mouse on`. Use `agent-journal tui --no-mouse` to leave mouse selection to the terminal or tmux.
 
 Run `agent-journal web` to open the overview in your browser, or `agent-journal web --project OWNER/REPO` to open a project directly. The command prints the URL for use in another browser or on a remote terminal. Sign in to the web journal with the server access token.

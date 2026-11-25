@@ -264,6 +264,9 @@ def check_clients(path, repo, cli, env, api, channel):
             "the restored Journey column", lambda: "Journey" in screen().splitlines()[2]
         )
         turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
+        lines = screen().splitlines()
+        if [line[1] for line in lines[turn_row : turn_row + 3]] != ["●", "│", "●"]:
+            raise RuntimeError("The terminal session line stops at the summary row")
         mouse(0, 1, turn_row, click=True)
         wait_for("the selected turn", lambda: selected(TASK))
         click_label("[Transcript]")
