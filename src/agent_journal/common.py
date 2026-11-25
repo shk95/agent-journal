@@ -71,6 +71,10 @@ def local_repo(cwd):
         return None
 
 
+class ConnectionRequired(ValueError):
+    pass
+
+
 class Api:
     def __init__(self, base=None, token=None):
         path = state_dir() / "connection.json"
@@ -104,7 +108,9 @@ class Api:
         ):
             raise ValueError("Use HTTPS for a remote journal server")
         if not self.token:
-            raise ValueError("Connect this machine or set AGENT_JOURNAL_TOKEN")
+            raise ConnectionRequired(
+                "Run agent-journal connect to set up the journal connection on this machine"
+            )
 
     def save(self):
         parent = state_dir()

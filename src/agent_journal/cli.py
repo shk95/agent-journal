@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .common import Api, local_repo, repo_key, state_dir
+from .common import Api, ConnectionRequired, local_repo, repo_key, state_dir
 
 
 def current(explicit):
@@ -14,23 +14,30 @@ def current(explicit):
         repo_key("https://github.com/" + explicit) if explicit else local_repo(".")
     )
     if not project:
-        raise ValueError("Specify --project OWNER/REPO or run inside a GitHub checkout")
-    return project
-
-
-def verified(project):
-    result = subprocess.run(
-        ["gh", "api", "repos/" + project, "--jq", ".full_name"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if result.returncode or result.stdout.strip().lower() != project:
+        if explicit:
+            raise ValueError("Specify a GitHub project as OWNER/REPO")
         raise ValueError(
-            f"GitHub repository verification failed for {project}: {result.stderr.strip()}"
+            "No GitHub project found in the current directory. Run inside a GitHub checkout."
         )
     return project
+
+
+def connect(url=None):
+    if url is None:
+        try:
+            url = input("Journal server URL: ").strip()
+        except EOFError:
+            raise ConnectionRequired("Enter a journal server URL with --url") from None
+    if not url:
+        raise ValueError("Enter a journal server URL")
+    token = getpass.getpass("Journal access token: ").strip()
+    if not token:
+        raise ValueError("Enter the journal access token")
+    api = Api(url, token)
+    projects = api.request("projects")
+    api.save()
+    print("Connected this machine.")
+    return api, projects
 
 
 def main():
@@ -48,16 +55,15 @@ def main():
     snapshot = commands.add_parser("backup")
     snapshot.add_argument("--database", type=Path)
     snapshot.add_argument("--output", type=Path, required=True)
-    for name in ("register", "disable"):
-        commands.add_parser(name).add_argument("--project", metavar="OWNER/REPO")
+    commands.add_parser("disable").add_argument("--project", metavar="OWNER/REPO")
     tui = commands.add_parser("tui", help="open the terminal journal")
     tui.add_argument("--project", metavar="OWNER/REPO")
     tui.add_argument("--no-mouse", action="store_true", help="disable mouse input")
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
     commands.add_parser("projects")
-    connect = commands.add_parser("connect")
-    connect.add_argument("--url", required=True)
+    connection = commands.add_parser("connect", help="set up the journal connection")
+    connection.add_argument("--url")
     mcp = commands.add_parser("mcp")
     mcp.add_argument("--project", metavar="OWNER/REPO")
     mcp.add_argument("--socket", type=Path)
@@ -74,13 +80,7 @@ def main():
             print("Journal backup created.")
             return
         if args.command == "connect":
-            token = getpass.getpass("Journal access token: ").strip()
-            if not token:
-                raise ValueError("Enter the journal access token")
-            api = Api(args.url, token)
-            api.request("projects")
-            api.save()
-            print("Connected this machine.")
+            connect(args.url)
             return
         if args.command == "serve":
             from .server import make_server
@@ -104,7 +104,27 @@ def main():
             from .tui import run
 
             project = current(args.project)
-            run(Api(), project, mouse=not args.no_mouse)
+            try:
+                api = Api()
+            except ConnectionRequired:
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    raise
+                api, projects = connect()
+            else:
+                projects = api.request("projects")
+            if not any(row["project"] == project for row in projects):
+                raise ValueError(
+                    f"{project} is not registered. Ask Codex to register it with Agent Journal."
+                )
+            run(api, project, mouse=not args.no_mouse)
+            return
+        if args.command == "mcp":
+            from .mcp_server import make_mcp
+
+            make_mcp(
+                default_project=current(args.project) if args.project else None,
+                socket=args.socket,
+            ).run()
             return
         api = Api()
         if args.command == "web":
@@ -120,12 +140,6 @@ def main():
         if args.command == "projects":
             for row in api.request("projects"):
                 print(row["project"], "active" if row["active"] else "disabled")
-        elif args.command == "mcp":
-            from .mcp_server import make_mcp
-
-            make_mcp(
-                api, current(args.project) if args.project else None, args.socket
-            ).run()
         elif args.command == "observe":
             from .observer import Cache, observe
 
@@ -147,9 +161,7 @@ def main():
                 cache.db.close()
         else:
             key = current(args.project)
-            if args.command == "register":
-                verified(key)
-            api.request(args.command, {"project": key})
+            api.request("disable", {"project": key})
             print(key)
     except KeyboardInterrupt:
         return

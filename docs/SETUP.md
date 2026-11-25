@@ -8,8 +8,6 @@ The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (
 
 ```sh
 nix profile add 'github:shk95/agent-journal#client'
-agent-journal connect --url https://journal.example.com
-agent-journal
 ```
 
 Older Nix versions use `nix profile install`. To run the client directly, use `nix run 'github:shk95/agent-journal#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
@@ -39,27 +37,21 @@ The default address is `http://127.0.0.1:8765`. For cloud use, keep the database
 
 ## Connect a work machine
 
-Connect each work machine once. The command prompts for the token and stores it in the machine's private journal directory.
+Run `agent-journal` inside a GitHub checkout. On the first interactive run, enter the journal server URL and access token. The client checks the connection and saves the settings in `~/.agent-journal/connection.json`. You can also run the setup explicitly from any directory.
 
 ```sh
 agent-journal connect --url https://journal.example.com
 ```
 
-For service managers and temporary tests, the `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` environment variables override saved settings. For single-machine development, you can use the default loopback address.
+The TUI, local MCP tools, and observer use the same saved connection on each work machine. The `AGENT_JOURNAL_HOME` environment variable selects a different state directory. For service managers and temporary tests, `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` override saved settings.
 
-Register a repository from its checkout.
-
-```sh
-agent-journal register
-```
-
-Start one observer per work machine, then run Codex as usual from the repository.
+Install the [Codex MCP entry](#set-up-codex) and ask Codex to register the repository with Agent Journal. Start one observer per work machine to collect turns.
 
 ```sh
 agent-journal observe
 ```
 
-Open the terminal client from a second pane in the same repository. It reads the GitHub `origin` from the current checkout, including from a subdirectory. To select a different project, run `agent-journal tui --project OWNER/REPO`.
+Open the terminal client from a second pane in the same repository. It reads the GitHub `origin` from the current checkout, including from a subdirectory, and exits with a message if it cannot identify a registered project. To select a different project, run `agent-journal tui --project OWNER/REPO`.
 
 ```sh
 agent-journal
@@ -91,15 +83,17 @@ During a server outage, the observer uses its cached list of registered projects
 
 Collection uses the shared Codex App Server. Use `observe --socket PATH` for a different server socket. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
 
-## Read or write from Codex
+## Set up Codex
 
-Register the local MCP interface once on a connected work machine. Restart Codex after changing the configuration.
+Add the local MCP interface to your user-level Codex configuration once per work machine. Restart Codex after changing the configuration.
 
 ```sh
 codex mcp add journal -- agent-journal mcp
 ```
 
-Provide the GitHub project when Codex cannot infer it from the working directory. Ask Codex to name the axes it reads. For example, ask it to read Journey and then add a note to the previous result from this session. The tool locally resolves the current request and returns the preceding turns with their IDs. If two concurrent requests have identical text, specify the target session and turn.
+From the GitHub checkout, ask Codex to register this repository with Agent Journal. Its `register_project` tool uses the signed-in GitHub CLI to verify the repository and marks it active on the journal server. If the checkout is ambiguous, give Codex the GitHub `OWNER/REPO`. You can ask Codex to register the same project again to resume collection after disabling it.
+
+Ask Codex to name the axes it reads. For example, ask it to read Journey and then add a note to the previous result from this session. The tool locally resolves the current request and returns the preceding turns with their IDs. If two concurrent requests have identical text, specify the target session and turn.
 
 See [cloud operations](OPERATIONS.md) for deployment and backup restoration.
 
@@ -126,10 +120,16 @@ uv run --locked python scripts/dev.py serve
 
 In a second pane, use `uv run --locked python scripts/dev.py seed` to add the fixture project. Open it with `uv run --locked python scripts/dev.py client tui --project example/journal-fixture`, or run `uv run --locked python scripts/dev.py client web` for the web journal. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
 
-To try your normal Codex workflow against the development server, register a GitHub repository and start the observer in a separate pane.
+To try registration against the development server, start Codex from the Agent Journal checkout with a session-scoped MCP entry for the development server.
 
 ```sh
-uv run --locked python scripts/dev.py client register --project OWNER/REPO
+codex -c 'mcp_servers.journal_dev.command="uv"' \
+  -c 'mcp_servers.journal_dev.args=["run","--locked","python","scripts/dev.py","client","mcp"]'
+```
+
+Ask Codex to register an accessible GitHub repository using `journal_dev`. Start the development observer in a separate pane.
+
+```sh
 uv run --locked python scripts/dev.py client observe
 ```
 
@@ -148,7 +148,7 @@ uv build
 
 ### Local Codex and client smoke test
 
-Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. It checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It also opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, a Git checkout, sockets, and a generated journal token.
+Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. Codex registers the checkout through MCP using a synthetic GitHub CLI response. The test also checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, a Git checkout, sockets, and a generated journal token.
 
 ```sh
 uv run --locked --with playwright==1.65.2 python -m playwright install chromium

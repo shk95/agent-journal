@@ -24,6 +24,7 @@ from agent_journal.observer import Codex
 from scripts.dev import FIXTURE, seed
 
 PROJECT = "example/journal-smoke"
+REGISTER_TASK = "Register this repository with Agent Journal."
 TASK = "Verify the sample import."
 NOTE_TASK = "Attach a note to the previous result."
 ANSWER = "The sample import passed."
@@ -71,15 +72,20 @@ class FixtureModel(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         inputs = data.get("input", [])
         serialized = json.dumps(inputs)
+        outputs = {
+            item.get("call_id"): item.get("output")
+            for item in inputs
+            if item.get("type") == "function_call_output"
+        }
         name = call_id = None
         if "observations for the journal" in serialized:
             answer = SUMMARY if TASK in serialized else "Saved the requested turn note."
+        elif REGISTER_TASK in serialized:
+            if "fixture-register" not in outputs:
+                name, call_id = "register_project", "fixture-register"
+                arguments = {}
+            answer = "Registered the fixture project."
         elif NOTE_TASK in serialized:
-            outputs = {
-                item.get("call_id"): item.get("output")
-                for item in inputs
-                if item.get("type") == "function_call_output"
-            }
             if "fixture-read" not in outputs:
                 name, call_id = "read_journal", "fixture-read"
                 arguments = {
@@ -506,7 +512,20 @@ def smoke(path, binary, channel):
             environment.update(settings)
             with patch.dict(os.environ, settings):
                 api = Api()
-            api.request("register", {"project": PROJECT})
+                api.save()
+            fixture_bin = path / "bin"
+            fixture_bin.mkdir()
+            gh = fixture_bin / "gh"
+            gh.write_text(
+                '#!/bin/sh\n[ "$*" = '
+                + shlex.quote(
+                    f"api --hostname github.com repos/{PROJECT} --jq .full_name"
+                )
+                + " ] || exit 1\nprintf '%s\\n' "
+                + shlex.quote(PROJECT)
+                + "\n"
+            )
+            gh.chmod(0o700)
 
             config = provider_config(f"http://127.0.0.1:{provider.server_port}/v1")
             runtime = path / "codex-state"
@@ -519,11 +538,11 @@ def smoke(path, binary, channel):
                 "-c",
                 "mcp_servers={}",
             ]
-            mcp_args = ["mcp", "--project", PROJECT, "--socket", str(rpc)]
+            mcp_args = ["mcp", "--socket", str(rpc)]
             for key, value in {
                 "command": str(cli),
                 "args": mcp_args,
-                "env_vars": list(settings),
+                "env_vars": ["AGENT_JOURNAL_HOME", "PATH"],
                 "default_tools_approval_mode": "approve",
             }.items():
                 local_config.extend(
@@ -553,8 +572,13 @@ def smoke(path, binary, channel):
                             "plugins",
                             *local_config,
                         ],
-                        cwd=repo,
-                        env=environment,
+                        cwd=path,
+                        env=environment
+                        | {
+                            "PATH": str(fixture_bin) + os.pathsep + environment["PATH"],
+                            "AGENT_JOURNAL_URL": "",
+                            "AGENT_JOURNAL_TOKEN": "",
+                        },
                     )
                 )
                 wait_for("the Codex socket", rpc.exists)
@@ -566,15 +590,21 @@ def smoke(path, binary, channel):
                     )
                 )
                 with contextlib.closing(Codex(rpc)) as codex:
-                    session = codex.call(
-                        "thread/start",
-                        {
-                            "cwd": str(repo),
-                            "historyMode": "paginated",
-                            "approvalPolicy": "never",
-                            "sandbox": "read-only",
-                        },
-                    )["thread"]["id"]
+                    options = {
+                        "cwd": str(repo),
+                        "historyMode": "paginated",
+                        "approvalPolicy": "never",
+                        "sandbox": "read-only",
+                    }
+                    registration = codex.call("thread/start", options)["thread"]["id"]
+                    start_turn(codex, registration, REGISTER_TASK)
+                    wait_for(
+                        "project registration through Codex",
+                        lambda: any(
+                            row["project"] == PROJECT for row in api.request("projects")
+                        ),
+                    )
+                    session = codex.call("thread/start", options)["thread"]["id"]
                     turn = start_turn(codex, session, TASK)
 
                     def recorded(identifier, **expected):

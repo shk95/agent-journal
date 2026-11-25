@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -126,6 +128,58 @@ class TestJournal(unittest.TestCase):
             main()
         self.assertEqual(run.call_args.args[1], "test/p")
         self.assertEqual(run.call_args.kwargs, {"mouse": False})
+
+    def test_default_tui_exits_outside_a_github_checkout(self):
+        with (
+            patch.object(sys, "argv", ["agent-journal"]),
+            patch("agent_journal.cli.local_repo", return_value=None),
+            patch("agent_journal.cli.Api") as api,
+            patch("builtins.print") as report,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("No GitHub project found", report.call_args.args[0])
+        api.assert_not_called()
+
+    def test_first_tui_run_connects_and_saves_private_settings(self):
+        with (
+            patch.object(sys, "argv", ["agent-journal"]),
+            patch.dict(
+                os.environ, {"AGENT_JOURNAL_URL": "", "AGENT_JOURNAL_TOKEN": ""}
+            ),
+            patch("agent_journal.cli.local_repo", return_value="test/p"),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys.stdout, "isatty", return_value=True),
+            patch("builtins.input", return_value=self.api.base) as url_prompt,
+            patch("getpass.getpass", return_value=self.api.token) as token_prompt,
+            patch("builtins.print"),
+            patch("agent_journal.tui.run") as run,
+        ):
+            main()
+            main()
+        url_prompt.assert_called_once()
+        token_prompt.assert_called_once()
+        self.assertEqual(run.call_count, 2)
+        saved = self.path / "connection.json"
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+        self.assertEqual(
+            json.loads(saved.read_text()),
+            {"url": self.api.base, "token": self.api.token},
+        )
+
+    def test_tui_exits_with_registration_notice_for_an_unknown_project(self):
+        with (
+            patch.object(sys, "argv", ["agent-journal"]),
+            patch("agent_journal.cli.local_repo", return_value="test/unregistered"),
+            patch("builtins.print") as report,
+            patch("agent_journal.tui.run") as run,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("Ask Codex to register", report.call_args.args[0])
+        run.assert_not_called()
 
     def test_scope_fork_history_and_note(self):
         scan(self.source, self.cache)
@@ -346,6 +400,71 @@ class TestJournal(unittest.TestCase):
                 self.assertNotIn("journey", value)
                 self.assertEqual(value["project_notes"], [])
                 self.assertEqual([n["turn"] for n in value["turn_notes"]], ["one"])
+
+        asyncio.run(check())
+
+    def test_mcp_can_start_before_the_machine_is_connected(self):
+        async def check():
+            params = StdioServerParameters(
+                command=str(Path(sys.executable).with_name("agent-journal")),
+                args=["mcp"],
+                env=dict(os.environ)
+                | {"AGENT_JOURNAL_TOKEN": "", "AGENT_JOURNAL_URL": ""},
+            )
+            async with Client(params, raise_exceptions=False) as client:
+                self.assertIn(
+                    "register_project",
+                    [tool.name for tool in (await client.list_tools()).tools],
+                )
+                result = await client.call_tool("journal_projects", {})
+                self.assertTrue(result.is_error)
+                self.assertIn("agent-journal connect", result.content[0].text)
+                self.api.save()
+                self.assertFalse(
+                    (await client.call_tool("journal_projects", {})).is_error
+                )
+
+        asyncio.run(check())
+
+    def test_mcp_registration_checks_github_and_keeps_active_cutoff(self):
+        async def check():
+            success = subprocess.CompletedProcess([], 0, "Test/New\n", "")
+            failure = subprocess.CompletedProcess([], 1, "", "Repository not found")
+            with (
+                patch("agent_journal.mcp_server.local_repo", return_value="test/new"),
+                patch(
+                    "agent_journal.mcp_server.subprocess.run",
+                    side_effect=[success, success, failure],
+                ) as gh,
+            ):
+                async with Client(make_mcp(self.api), raise_exceptions=False) as client:
+                    for attempt in range(2):
+                        result = await client.call_tool("register_project", {})
+                        self.assertFalse(result.is_error)
+                        self.assertEqual(
+                            result.structured_content, {"project": "test/new"}
+                        )
+                        row = next(
+                            p
+                            for p in self.api.request("projects")
+                            if p["project"] == "test/new"
+                        )
+                        if attempt == 0:
+                            cutoff = row["since"]
+                        self.assertEqual(row["since"], cutoff)
+                        self.assertTrue(row["active"])
+                    rejected = await client.call_tool(
+                        "register_project", {"project": "Test/Missing"}
+                    )
+                    self.assertTrue(rejected.is_error)
+                    self.assertIn("Repository not found", rejected.content[0].text)
+                self.assertEqual(
+                    gh.call_args_list[0].args[0][-3:],
+                    ["repos/test/new", "--jq", ".full_name"],
+                )
+            self.assertNotIn(
+                "test/missing", [row["project"] for row in self.api.request("projects")]
+            )
 
         asyncio.run(check())
 

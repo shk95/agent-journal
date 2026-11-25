@@ -94,7 +94,7 @@ journal.example.com {
 }
 ```
 
-Start both services and check that they restart on boot. From each work machine run `agent-journal connect --url https://journal.example.com`, register a repository on one machine, then start its observer and the observer on the second machine. Verify that `agent-journal projects` lists the same registration on both machines and that the browser accepts the token over HTTPS.
+Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then start an observer on each machine. Verify that `agent-journal projects` lists the same registration on both machines and that the browser accepts the token over HTTPS.
 
 ## Observers
 

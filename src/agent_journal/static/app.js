@@ -145,7 +145,7 @@ function overview(entries) {
     out.append(
       node(
         "p",
-        "Run agent-journal register in a project to see it here.",
+        "Ask Codex to register a GitHub project with Agent Journal.",
         "empty",
       ),
     );
