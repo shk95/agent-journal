@@ -1,0 +1,265 @@
+:root {
+  color-scheme: light;
+  --paper: #f8f8f4;
+  --ink: #252b29;
+  --line: #cdd1c8;
+  --green: #287552;
+  --muted: #636c67;
+  font:
+    15px/1.55 "IBM Plex Sans",
+    system-ui,
+    sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+body > header {
+  min-height: 64px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 4vw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #eff1e9;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  background: #fafbf7;
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 5px;
+  padding: 5px 11px;
+}
+button:hover,
+button:focus-visible {
+  border-color: var(--green);
+  color: var(--green);
+}
+button:disabled {
+  opacity: 0.55;
+}
+.brand {
+  font-weight: 750;
+  font-size: 18px;
+  border: none;
+  background: none;
+  padding: 0;
+  letter-spacing: -0.05em;
+}
+main {
+  max-width: 1600px;
+  margin: auto;
+  padding: 34px 4vw 70px;
+}
+.heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+h1 {
+  font-size: clamp(26px, 3vw, 44px);
+  letter-spacing: -0.055em;
+  margin: 14px 0 24px;
+  font-weight: 640;
+}
+h2 {
+  font-size: 17px;
+  letter-spacing: -0.025em;
+  margin: 0;
+}
+nav,
+#connection,
+small {
+  font-size: 13px;
+  color: var(--muted);
+}
+nav a,
+a {
+  color: var(--green);
+}
+#axes {
+  display: flex;
+  gap: 8px;
+}
+#axes label {
+  font-size: 14px;
+}
+input[type="checkbox"] {
+  accent-color: var(--green);
+}
+.project {
+  padding: 18px 0;
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) 2fr;
+  gap: 15px;
+  border-top: 1px solid var(--line);
+}
+.project a {
+  font-size: 20px;
+  font-weight: 650;
+  text-decoration: none;
+}
+.project p {
+  margin: 4px 0;
+}
+.board {
+  display: grid;
+  align-items: start;
+  border-top: 2px solid var(--ink);
+  overflow: auto;
+}
+.head,
+.cell,
+.free {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.head {
+  background: #ecefe7;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cell {
+  align-self: stretch;
+  min-height: 70px;
+}
+.rowbtn {
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 0;
+}
+.req {
+  font-weight: 650;
+  display: block;
+  overflow-wrap: anywhere;
+}
+.result,
+.note {
+  display: block;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.live {
+  color: var(--green);
+  font-weight: bold;
+}
+.small {
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.free {
+  grid-row: 2 / span 1;
+  align-self: start;
+}
+.empty {
+  color: var(--muted);
+}
+dialog {
+  width: min(800px, 94vw);
+  max-height: 82vh;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0;
+  box-shadow: 0 14px 64px #16251a2b;
+}
+dialog::backdrop {
+  background: #192a215e;
+}
+dialog header {
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#modalBody {
+  padding: 18px 20px;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+textarea,
+input[type="password"] {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: white;
+  padding: 10px;
+}
+textarea {
+  min-height: 150px;
+  margin-bottom: 12px;
+}
+#auth {
+  max-width: 420px;
+}
+#auth button {
+  margin-top: 12px;
+}
+.session {
+  border-left: 3px solid var(--session);
+  padding-left: 8px;
+}
+.graph {
+  float: left;
+  margin-right: 10px;
+}
+.note {
+  border-left: 2px solid #9cb6a1;
+  padding-left: 8px;
+}
+@media (max-width: 650px) {
+  main {
+    padding: 20px 12px;
+  }
+  .project {
+    display: block;
+  }
+  .board {
+    font-size: 14px;
+  }
+  .head,
+  .cell,
+  .free {
+    padding: 8px;
+  }
+  .heading {
+    margin-bottom: 12px;
+  }
+}

@@ -1,0 +1,13 @@
+[project]
+name = "agent-journal"
+version = "0.1.0"
+description = "A personal journal for Codex sessions across GitHub projects"
+requires-python = ">=3.11"
+dependencies = ["websockets>=15,<17"]
+
+[project.scripts]
+agent-journal = "agent_journal.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

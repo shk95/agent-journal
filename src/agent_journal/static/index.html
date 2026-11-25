@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agent Journal</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <button id="home" class="brand" aria-label="All projects">
+        ◉ &nbsp;Agent Journal</button
+      ><span id="connection" role="status"></span>
+    </header>
+    <main>
+      <section id="login" hidden>
+        <h1>Open your journal</h1>
+        <form id="auth">
+          <label
+            >Server access token<input
+              id="token"
+              type="password"
+              required
+              autocomplete="current-password" /></label
+          ><button>Connect</button>
+        </form>
+      </section>
+      <section id="view" hidden>
+        <nav id="crumb"></nav>
+        <div class="heading">
+          <h1 id="title"></h1>
+          <div id="axes"></div>
+        </div>
+        <div id="content"></div>
+      </section>
+    </main>
+    <dialog id="detail">
+      <header>
+        <strong id="modalTitle"></strong><button id="close">Close</button>
+      </header>
+      <div id="modalBody"></div>
+    </dialog>
+  </body>
+</html>
