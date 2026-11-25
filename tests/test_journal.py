@@ -97,6 +97,8 @@ class TestJournal(unittest.TestCase):
         self.assertEqual([r["turn"] for r in rows], ["one", "two"])
         self.assertNotIn("other", self.source.read)
         self.assertEqual(rows[-1]["parent"], "a")
+        self.assertEqual(rows[-1]["parent_turn"], "one")
+        self.assertEqual([row["graph"] for row in rows], ["●─┐", "  ●"])
         args = {"project": "test/p", "thread": "a", "turn": "one"}
         self.assertEqual(self.api.request("transcript", **args)[-1]["text"], "green")
         note = args | {"id": "memo", "body": "remember"}
@@ -224,6 +226,36 @@ class TestJournal(unittest.TestCase):
         self.api.token = "invalid"
         with self.assertRaisesRegex(RuntimeError, "401"):
             self.api.request("projects")
+
+    def test_journey_pagination_and_overview(self):
+        self.cache.flush(self.api, scan(self.source, self.cache))
+        rows = self.api.request("journey", project="test/p", limit=1)
+        latest = rows[0]
+        self.assertEqual(latest["turn"], "two")
+        before = json.dumps([latest["started"], latest["turn"], latest["thread"]])
+        earlier = self.api.request("journey", project="test/p", limit=1, before=before)
+        self.assertEqual([r["turn"] for r in earlier], ["one"])
+        self.assertEqual(
+            [r["turn"] for r in self.api.request("overview")[0]["turns"]], ["two"]
+        )
+
+    def test_edit_note_uses_version_and_preserves_target(self):
+        self.cache.flush(self.api, scan(self.source, self.cache))
+        project = {"project": "test/p"}
+        for key, target in (("attached", {"thread": "a", "turn": "one"}), ("free", {})):
+            self.api.request(
+                "notes", project | {"id": key, "body": "Original"} | target
+            )
+            update = project | {"id": key, "body": "Updated", "version": 1}
+            self.assertEqual(self.api.request("edit-note", update)["version"], 2)
+            self.assertEqual(self.api.request("edit-note", update)["version"], 2)
+            with self.assertRaisesRegex(RuntimeError, "409"):
+                self.api.request("edit-note", update | {"body": "Conflicting update"})
+        notes = self.api.request("notes", **project)
+        self.assertEqual(
+            [(n["body"], n["turn"]) for n in notes],
+            [("Updated", "one"), ("Updated", None)],
+        )
 
     def test_github_keys(self):
         for url in (

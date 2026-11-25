@@ -15,7 +15,8 @@ function statusLabel(row) {
 }
 const axes = ["Journey", "Turn notes", "Project notes"];
 const visible = new Set(axes);
-const colors = ["#24794e", "#735995", "#a76135", "#397e93", "#8e5764"];
+const pageSize = 60;
+let before = "";
 let last = "",
   version = 0;
 function node(tag, text, cls) {
@@ -56,20 +57,23 @@ function modal(title, child) {
   $("modalBody").replaceChildren(child);
   $("detail").showModal();
 }
-function addNote(project, target = {}) {
+function editNote(project, target = {}, note = null) {
   const form = node("form"),
     area = node("textarea"),
     submit = node("button", "Save"),
     err = node("p");
   area.required = true;
+  area.value = note?.body ?? "";
   area.setAttribute("aria-label", "Note text");
-  const id = crypto.randomUUID();
+  const id = note?.id ?? crypto.randomUUID();
   form.append(area, submit, err);
   form.onsubmit = async (ev) => {
     ev.preventDefault();
     submit.disabled = true;
     try {
-      await api("notes", {}, { project, id, body: area.value, ...target });
+      const payload = { project, id, body: area.value };
+      if (note) await api("edit-note", {}, { ...payload, version: note.version });
+      else await api("notes", {}, { ...payload, ...target });
       $("detail").close();
       last = "";
       await refresh();
@@ -79,7 +83,7 @@ function addNote(project, target = {}) {
       submit.disabled = false;
     }
   };
-  modal(target.turn ? "Add turn note" : "Add project note", form);
+  modal(note ? "Edit note" : (target.turn ? "Add turn note" : "Add project note"), form);
   area.focus();
 }
 async function transcript(project, r) {
@@ -101,9 +105,15 @@ function projectLink(k) {
   a.href = "#" + encodeURIComponent(k);
   return a;
 }
+function noteView(project, note) {
+  const el = node("div", undefined, "note");
+  el.append(node("div", note.body), action("Edit", () => editNote(project, {}, note), "small"));
+  return el;
+}
 function overview(entries) {
   const out = node("div");
-  for (const [p, rows] of entries) {
+  for (const p of entries) {
+    const rows = p.turns;
     const section = node("article", undefined, "project"),
       left = node("div"),
       right = node("div");
@@ -121,8 +131,11 @@ function overview(entries) {
       ),
     );
     const display = live.length ? live : rows.slice(-1);
-    for (const r of display)
-      right.append(node("p", r.prompt + " → " + r.summary));
+    for (const r of display) {
+      const item = node("p", r.prompt + " → " + r.summary);
+      item.append(node("small", statusLabel(r), "meta"));
+      right.append(item);
+    }
     if (!display.length)
       right.append(node("small", "No recorded turns yet"));
     section.append(left, right);
@@ -154,34 +167,15 @@ function board(project, rows, notes) {
     const head = node("div", undefined, "head");
     head.append(node("h2", a));
     if (a === "Project notes")
-      head.append(action("＋", () => addNote(project), "small"));
+      head.append(action("＋", () => editNote(project), "small"));
     put(head, a, 1);
   }
-  const sessions = [...new Set(rows.map((r) => r.thread))];
-  const lastRow = new Map(),
-    firstRow = new Map();
-  rows.forEach((r, i) => {
-    if (!firstRow.has(r.thread)) firstRow.set(r.thread, i);
-    lastRow.set(r.thread, i);
-  });
   rows.forEach((r, i) => {
     if (visible.has("Journey")) {
       const cell = node("div", undefined, "cell"),
         button = action("", () => transcript(project, r), "rowbtn");
-      const mark = node("span", undefined, "graph");
+      const mark = node("span", r.graph, "graph");
       mark.setAttribute("aria-hidden", "true");
-      for (const s of sessions) {
-        if (firstRow.get(s) > i || lastRow.get(s) < i) continue;
-        const glyph =
-          s === r.thread
-            ? r.parent && firstRow.get(s) === i
-              ? "⑂"
-              : "●"
-            : "│";
-        const lane = node("span", glyph);
-        lane.style.color = colors[sessions.indexOf(s) % colors.length];
-        mark.append(lane);
-      }
       const meta = node("div", undefined, "meta");
       const time = new Date(r.started * 1000).toLocaleString("en-US", {
         month: "numeric",
@@ -195,8 +189,8 @@ function board(project, rows, notes) {
         node("span", r.thread.slice(-6)),
         node("span", statusLabel(r), statusLabel(r) === labels.inProgress ? "live" : ""),
       );
-      if (r.parent && firstRow.get(r.thread) === i)
-        meta.append(node("span", "↳ " + r.parent.slice(-6)));
+      if (r.parent && !rows.slice(0, i).some(({ thread }) => thread === r.thread))
+        meta.append(node("span", "Fork of " + r.parent.slice(-6)));
       button.append(
         meta,
         node("span", r.prompt, "req"),
@@ -211,11 +205,11 @@ function board(project, rows, notes) {
       for (const n of notes.filter(
         (n) => n.turn === r.turn && n.thread === r.thread,
       ))
-        cell.append(node("p", n.body, "note"));
+        cell.append(noteView(project, n));
       cell.append(
         action(
           "+ Note",
-          () => addNote(project, { thread: r.thread, turn: r.turn }),
+          () => editNote(project, { thread: r.thread, turn: r.turn }),
           "small",
         ),
       );
@@ -231,7 +225,7 @@ function board(project, rows, notes) {
   if (visible.has("Project notes")) {
     const panel = node("div", undefined, "free");
     for (const n of notes.filter((n) => !n.turn))
-      panel.append(node("p", n.body, "note"));
+      panel.append(noteView(project, n));
     put(panel, "Project notes", 2);
     panel.style.gridRow = "2 / span " + Math.max(1, rows.length);
   }
@@ -240,26 +234,18 @@ function board(project, rows, notes) {
 async function refresh() {
   const current = ++version;
   try {
-    const key = decodeURIComponent(location.hash.slice(1)),
-      projects = await api("projects");
-    let data;
-    if (key)
-      data = await Promise.all([
-        api("journey", { project: key }),
-        api("notes", { project: key }),
-      ]);
-    else
-      data = await Promise.all(
-        projects.map(async (p) => [
-          p,
-          await api("journey", { project: p.project }),
-        ]),
-      );
+    const key = decodeURIComponent(location.hash.slice(1));
+    const data = key
+      ? await Promise.all([
+          api("journey", { project: key, limit: pageSize + 1, before }),
+          api("notes", { project: key }),
+        ])
+      : await api("overview");
     if (current !== version) return;
     $("login").hidden = true;
     $("view").hidden = false;
     $("connection").textContent = "Connected";
-    const sig = JSON.stringify([key, [...visible], data]);
+    const sig = JSON.stringify([key, before, [...visible], data]);
     if (sig === last) return;
     last = sig;
     $("crumb").replaceChildren();
@@ -282,7 +268,23 @@ async function refresh() {
         $("axes").append(label);
       }
     }
-    $("content").replaceChildren(key ? board(key, ...data) : overview(data));
+    if (!key) {
+      $("content").replaceChildren(overview(data));
+      return;
+    }
+    const [turns, notes] = data;
+    const rows = turns.slice(-pageSize);
+    const nav = node("div", undefined, "pagination");
+    if (turns.length > pageSize) {
+      nav.append(action("Earlier turns", () => {
+        const { started, turn, thread } = rows[0];
+        before = JSON.stringify([started, turn, thread]);
+        refresh();
+      }));
+    }
+    if (before) nav.append(action("Latest turns", () => { before = ""; refresh(); }));
+    $("content").replaceChildren(nav, board(key, rows, notes));
+
   } catch (e) {
     if (current === version) $("connection").textContent = e.message;
   }
@@ -302,7 +304,7 @@ $("auth").onsubmit = async (e) => {
     $("connection").textContent = err.message;
   }
 };
-window.addEventListener("hashchange", refresh);
+window.addEventListener("hashchange", () => { before = ""; refresh(); });
 refresh();
 setInterval(() => {
   if (!document.hidden && !$("detail").open && $("login").hidden) refresh();

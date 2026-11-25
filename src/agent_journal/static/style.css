@@ -232,13 +232,9 @@ textarea {
 #auth button {
   margin-top: 12px;
 }
-.session {
-  border-left: 3px solid var(--session);
-  padding-left: 8px;
-}
 .graph {
-  float: left;
-  margin-right: 10px;
+  white-space: pre;
+  color: var(--green);
 }
 .note {
   border-left: 2px solid #9cb6a1;
@@ -263,3 +259,6 @@ textarea {
     margin-bottom: 12px;
   }
 }
+
+.pagination { display: flex; gap: 10px; margin-bottom: 12px; }
+.pagination:empty { display: none; }

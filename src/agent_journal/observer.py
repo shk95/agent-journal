@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from contextlib import closing
+from itertools import chain, pairwise
 from pathlib import Path
 
 from websockets.exceptions import WebSocketException
@@ -241,60 +242,77 @@ def scan_thread(rpc, cache, thread, project, since, active=None):
     }
     parent = thread.get("forkedFromId")
     inherited = set()
+    parent_available = True
     if parent:
-        for page in rpc.pages(
-            "thread/turns/list",
-            args | {"threadId": parent, "itemsView": "notLoaded", "limit": 100},
-        ):
-            inherited.update(row["id"] for row in page)
-            if any((row.get("startedAt") or 0) < int(since) for row in page):
-                break
-    stable = True
-    for page in rpc.pages("thread/turns/list", args):
-        for index, turn in enumerate(page):
-            started = turn.get("startedAt")
-            if started is None:
-                continue
-            if started < int(since):
-                return stable
-            if turn_start(turn["id"], started) < since:
-                continue
-            items = turn.get("items", [])
-            if turn["id"] in inherited or not any(
-                x["type"] == "userMessage" for x in items
+        try:
+            for page in rpc.pages(
+                "thread/turns/list",
+                args | {"threadId": parent, "itemsView": "notLoaded", "limit": 100},
             ):
-                continue
-            status = turn["status"]
-            if status == "interrupted" and turn.get("completedAt") is None:
-                stable = False
-                continue
-            if status not in ("completed", "failed", "interrupted", "inProgress"):
-                continue
-            if status == "inProgress" and active is not None:
-                active.add((project, thread_id, turn["id"]))
-            previous = None
-            if index + 1 < len(page):
-                prior = page[index + 1]
-                if turn_start(prior["id"], prior.get("startedAt") or 0) >= since:
-                    previous = {
-                        "request": short(request_text(prior.get("items", [])), 400),
-                        "answer": summarize(prior.get("items", []), prior["status"]),
-                    }
-            cache.put(
-                {
-                    "project": project,
-                    "thread": thread_id,
-                    "turn": turn["id"],
-                    "parent": parent,
-                    "started": started,
-                    "status": status,
-                    "prompt": request_text(items) or "Request with attachments",
-                    "summary": summarize(items, status),
-                    "items": items,
-                },
-                previous,
-            )
-    return stable
+                inherited.update(row["id"] for row in page)
+                if any((row.get("startedAt") or 0) < int(since) for row in page):
+                    break
+        except RuntimeError:
+            parent_available = False
+
+    pending = []
+    stable = True
+    fork_turn = None
+    history = (
+        row
+        for page in rpc.pages("thread/turns/list", args)
+        for row in page
+        if any(item["type"] == "userMessage" for item in row.get("items", []))
+    )
+    for turn, prior in pairwise(chain(history, [None])):
+        started = turn.get("startedAt")
+        if started is None:
+            continue
+        if started < int(since):
+            break
+        items = turn.get("items", [])
+        if turn["id"] in inherited:
+            fork_turn = turn["id"]
+            break
+        if turn_start(turn["id"], started) < since:
+            continue
+        if not parent_available and (
+            not thread.get("createdAt") or started <= thread["createdAt"]
+        ):
+            stable = False
+            continue
+        status = turn["status"]
+        if status == "interrupted" and turn.get("completedAt") is None:
+            stable = False
+            continue
+        if status not in ("completed", "failed", "interrupted", "inProgress"):
+            continue
+        if status == "inProgress" and active is not None:
+            active.add((project, thread_id, turn["id"]))
+        previous = None
+        if prior and turn_start(prior["id"], prior.get("startedAt") or 0) >= since:
+            previous = {
+                "request": short(request_text(prior.get("items", [])), 400),
+                "answer": summarize(prior.get("items", []), prior["status"]),
+            }
+        record = {
+            "project": project,
+            "thread": thread_id,
+            "turn": turn["id"],
+            "parent": parent,
+            "started": started,
+            "status": status,
+            "prompt": request_text(items) or "Request with attachments",
+            "summary": summarize(items, status),
+            "items": items,
+        }
+        if parent:
+            pending.append((record, previous))
+        else:
+            cache.put(record, previous)
+    for record, previous in pending:
+        cache.put(record | {"parent_turn": fork_turn}, previous)
+    return stable and parent_available
 
 
 def observe(api, cache, socket, interval, once):

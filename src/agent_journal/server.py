@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .common import OBSERVATION_LEASE, PROJECT, turn_start
+from .graph import graph
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -44,14 +45,12 @@ def listing(db, sql, values=()):
     return [dict(row) for row in db.execute(sql, values)]
 
 
-def journey(db, project):
-    rows = listing(
-        db,
-        """SELECT thread,turn,parent,started,status,prompt,summary,updated,since,active
-           FROM turns JOIN projects USING(project) WHERE project=?
-           ORDER BY started,turn,thread""",
-        (project,),
-    )
+TURN_COLUMNS = (
+    "thread,turn,parent,parent_turn,started,status,prompt,summary,updated,since,active"
+)
+
+
+def with_observation(rows):
     now = time.time()
     for row in rows:
         updated, since, active = (
@@ -64,15 +63,58 @@ def journey(db, project):
                 row["observation"] = "unavailable"
             else:
                 row["observation"] = "observed"
-    return sorted(
-        rows,
-        key=lambda r: (turn_start(r["turn"], r["started"]), r["thread"], r["turn"]),
+    return rows
+
+
+def journey(db, project, args):
+    sql = (
+        f"SELECT {TURN_COLUMNS} FROM turns JOIN projects USING(project) WHERE project=?"
     )
+    values = [project]
+    if args.get("thread"):
+        sql += " AND thread=?"
+        values.append(args["thread"])
+    if args.get("exclude_turn"):
+        sql += " AND turn<>?"
+        values.append(args["exclude_turn"])
+    if args.get("before"):
+        cursor = json.loads(args["before"])
+        if not isinstance(cursor, list) or len(cursor) != 3:
+            raise ValueError("Invalid journey cursor")
+        sql += " AND (started,turn,thread)<(?,?,?)"
+        values.extend(cursor)
+    sql += " ORDER BY started DESC,turn DESC,thread DESC"
+    if args.get("limit"):
+        sql += " LIMIT ?"
+        values.append(max(1, min(200, int(args["limit"]))))
+    rows = with_observation(listing(db, sql, values)[::-1])
+    for row, line in zip(rows, graph(rows)):
+        row["graph"] = line
+    return rows
+
+
+def overview(db):
+    projects = listing(db, "SELECT project,active FROM projects ORDER BY project")
+    now = time.time()
+    for project in projects:
+        key = project["project"]
+        running = listing(
+            db,
+            f"""SELECT {TURN_COLUMNS} FROM turns JOIN projects USING(project)
+                    WHERE project=? AND active=1 AND status='inProgress'
+                    AND started>=since AND updated>=?
+                    ORDER BY started,turn,thread""",
+            (key, now - OBSERVATION_LEASE),
+        )
+        project["turns"] = with_observation(running) or journey(db, key, {"limit": 1})
+    return projects
 
 
 def endpoint(db, method, path, args):
     if method == "GET" and path == "projects":
         return listing(db, "SELECT * FROM projects ORDER BY project")
+    if method == "GET" and path == "overview":
+        return overview(db)
     project = args.get("project", "")
     if not isinstance(project, str) or not PROJECT.fullmatch(project):
         raise ValueError("Invalid project")
@@ -101,7 +143,7 @@ def endpoint(db, method, path, args):
         )
         return {"accepted": True}
     if method == "GET" and path == "journey":
-        return journey(db, project)
+        return journey(db, project, args)
     if method == "GET" and path == "transcript":
         row = db.execute(
             "SELECT items FROM turns WHERE project=? AND thread=? AND turn=?",
@@ -111,19 +153,62 @@ def endpoint(db, method, path, args):
             raise KeyError("Turn not found")
         return json.loads(row["items"])
     if path == "notes" and method == "GET":
-        return listing(
-            db, "SELECT * FROM notes WHERE project=? ORDER BY created,id", (project,)
-        )
+        sql, values = "SELECT * FROM notes WHERE project=?", [project]
+        axis = args.get("axis")
+        if axis == "project":
+            sql += " AND turn IS NULL"
+        elif axis == "turn":
+            sql += " AND turn IS NOT NULL"
+            if args.get("thread"):
+                sql += " AND thread=?"
+                values.append(args["thread"])
+            if args.get("exclude_turn"):
+                sql += " AND turn<>?"
+                values.append(args["exclude_turn"])
+        elif axis:
+            raise ValueError("Invalid note axis")
+        sql += " ORDER BY created DESC,id DESC"
+        if args.get("limit"):
+            sql += " LIMIT ?"
+            values.append(max(1, min(200, int(args["limit"]))))
+        return listing(db, sql, values)[::-1]
     if path == "notes" and method == "POST":
         body = args["body"].strip()
-        thread, turn = args.get("thread"), args.get("turn")
-        if bool(thread) != bool(turn) or not body:
+        thread, turn = args.get("thread") or None, args.get("turn") or None
+        if bool(thread) != bool(turn) or not body or len(body) > 40_000:
             raise ValueError("A note needs text and a valid target")
         db.execute(
-            "INSERT INTO notes VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            """INSERT INTO notes(id,project,thread,turn,body,created) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(id) DO NOTHING""",
             (args["id"], project, thread, turn, body, time.time()),
         )
+        saved = db.execute(
+            "SELECT project,thread,turn FROM notes WHERE id=?", (args["id"],)
+        ).fetchone()
+        if tuple(saved) != (project, thread, turn):
+            raise ValueError("Note ID already belongs to a different target")
         return {"id": args["id"]}
+    if path == "edit-note" and method == "POST":
+        body = args["body"].strip()
+        if not body or len(body) > 40_000:
+            raise ValueError("A note needs text")
+        row = db.execute(
+            "SELECT body,version FROM notes WHERE project=? AND id=?",
+            (project, args["id"]),
+        ).fetchone()
+        if not row:
+            raise KeyError("Note not found")
+        if row["body"] == body:
+            return {"id": args["id"], "version": row["version"]}
+        if row["version"] != args["version"]:
+            raise Conflict(
+                "This note changed elsewhere. Reopen it to edit the latest version."
+            )
+        db.execute(
+            "UPDATE notes SET body=?,version=version+1 WHERE project=? AND id=?",
+            (body, project, args["id"]),
+        )
+        return {"id": args["id"], "version": row["version"] + 1}
     if path == "turns" and method == "POST":
         row = db.execute(
             "SELECT since, active FROM projects WHERE project=?", (project,)
@@ -137,11 +222,12 @@ def endpoint(db, method, path, args):
         if args["status"] not in ("inProgress", "completed", "failed", "interrupted"):
             raise ValueError("Invalid turn status")
         db.execute(
-            """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,parent,items,revision,updated)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,parent,items,revision,updated,parent_turn)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(project,thread,turn) DO UPDATE SET
                     status=excluded.status,prompt=excluded.prompt,summary=excluded.summary,
-                    parent=excluded.parent,items=excluded.items,revision=excluded.revision,
+                    started=excluded.started,parent=excluded.parent,parent_turn=excluded.parent_turn,
+                    items=excluded.items,revision=excluded.revision,
                     updated=COALESCE(excluded.updated,turns.updated)
                     WHERE excluded.revision > turns.revision AND
                     (turns.status='inProgress' OR excluded.status!='inProgress')""",
@@ -149,7 +235,7 @@ def endpoint(db, method, path, args):
                 project,
                 args["thread"],
                 args["turn"],
-                args["started"],
+                turn_start(args["turn"], args["started"]),
                 args["status"],
                 args["prompt"],
                 args["summary"],
@@ -157,10 +243,15 @@ def endpoint(db, method, path, args):
                 json.dumps(args["items"], ensure_ascii=False),
                 args["revision"],
                 time.time() if args.get("observed", True) else None,
+                args.get("parent_turn"),
             ),
         )
         return {"accepted": True}
     raise KeyError("Unknown endpoint")
+
+
+class Conflict(Exception):
+    pass
 
 
 class JournalHandler(BaseHTTPRequestHandler):
@@ -247,6 +338,8 @@ class JournalHandler(BaseHTTPRequestHandler):
             self.reply(400, {"error": str(e)})
         except KeyError as e:
             self.reply(404, {"error": str(e)})
+        except Conflict as e:
+            self.reply(409, {"error": str(e)})
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -258,10 +351,20 @@ def make_server(host, port, database, token):
         raise ValueError("Set AGENT_JOURNAL_TOKEN first")
     with closing(connect(database)) as db:
         db.executescript(SCHEMA)
-        if "updated" not in {
-            row["name"] for row in db.execute("PRAGMA table_info(turns)")
-        }:
-            db.execute("ALTER TABLE turns ADD COLUMN updated REAL")
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            for table, field, definition in (
+                ("turns", "updated", "REAL"),
+                ("turns", "parent_turn", "TEXT"),
+                ("notes", "version", "INTEGER NOT NULL DEFAULT 1"),
+            ):
+                if field not in {
+                    row["name"] for row in db.execute(f"PRAGMA table_info({table})")
+                }:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {field} {definition}")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS active_turns ON turns(project,updated) WHERE status='inProgress'"
+            )
     server = ThreadingHTTPServer((host, port), JournalHandler)
     server.token, server.database = token, database
     return server
