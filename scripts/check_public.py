@@ -15,6 +15,7 @@ ROOT_FILES = {
     "RELEASE_PLAN.md",
     "flake.nix",
     "flake.lock",
+    "justfile",
     "pyproject.toml",
     "uv.lock",
 }

@@ -101,20 +101,26 @@ See [cloud operations](OPERATIONS.md) for deployment and backup restoration.
 
 ## Local development
 
+### Interactive fixture demo
+
+Install `just` and `uv`, then run either command from the checkout.
+
+```sh
+just demo
+just demo web
+```
+
+Each command starts the server from the current checkout on a free loopback port and loads synthetic turns and notes into a temporary database. The default opens the terminal client on the fixture project. The web demo opens the same fixture in your browser. Use the temporary token printed in the terminal to sign in. Press `q` in the TUI or `Ctrl+C` in the terminal to stop the server and discard demo data. The demo uses its own connection settings.
+
+### Persistent development server
+
 Run the development server on loopback port 8766.
 
 ```sh
 uv run --locked python scripts/dev.py serve
 ```
 
-From a second pane, seed synthetic data and open the terminal client.
-
-```sh
-uv run --locked python scripts/dev.py seed
-uv run --locked python scripts/dev.py client tui --project example/journal-fixture
-```
-
-Open the development web journal with `uv run --locked python scripts/dev.py client web`. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
+In a second pane, use `uv run --locked python scripts/dev.py seed` to add the fixture project. Open it with `uv run --locked python scripts/dev.py client tui --project example/journal-fixture`, or run `uv run --locked python scripts/dev.py client web` for the web journal. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
 
 To try your normal Codex workflow against the development server, register a GitHub repository and start the observer in a separate pane.
 

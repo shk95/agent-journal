@@ -5,6 +5,8 @@ import math
 import os
 import secrets
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -23,10 +25,7 @@ def token(filepath):
     return filepath.read_text(encoding="utf-8").strip()
 
 
-def seed():
-    from agent_journal.common import Api
-
-    api = Api()
+def seed(api):
     api.request("register", {"project": FIXTURE})
     project = next(row for row in api.request("projects") if row["project"] == FIXTURE)
     samples = [
@@ -67,37 +66,92 @@ def seed():
         {"id": "fixture-project-note", "body": "Keep the import examples short."},
     ):
         api.request("notes", {"project": FIXTURE, **note})
-    print(FIXTURE)
+
+
+def demo(client, port):
+    from agent_journal.common import Api
+    from agent_journal.server import make_server
+
+    access = secrets.token_urlsafe(32)
+    with tempfile.TemporaryDirectory(prefix="agent-journal-demo-") as folder:
+        database = Path(folder) / "server.sqlite3"
+        with make_server("127.0.0.1", port, database, access) as server:
+            base = f"http://127.0.0.1:{server.server_port}"
+            os.environ.update(
+                AGENT_JOURNAL_HOME=folder,
+                AGENT_JOURNAL_TOKEN=access,
+                AGENT_JOURNAL_URL=base,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                api = Api()
+                seed(api)
+                if client == "tui":
+                    from agent_journal.tui import run
+
+                    run(api, FIXTURE)
+                else:
+                    import webbrowser
+                    from urllib.parse import quote
+
+                    url = base + "/#" + quote(FIXTURE, safe="")
+                    print(f"Fixture journal: {url}")
+                    print(f"Temporary access token: {access}")
+                    print("Press Ctrl+C to stop the demo.", flush=True)
+                    webbrowser.open_new_tab(url)
+                    threading.Event().wait()
+            finally:
+                server.shutdown()
+                thread.join()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="loopback port (default: automatic for demo, 8766 otherwise)",
+    )
     parser.add_argument(
         "--state",
         type=Path,
         default=Path(os.environ.get("AGENT_JOURNAL_DEV_HOME", ROOT / ".local/dev")),
+        help="state directory for the persistent development server",
     )
-    parser.add_argument("command", choices=("serve", "seed", "token", "client"))
+    parser.add_argument("command", choices=("demo", "serve", "seed", "token", "client"))
     parser.add_argument("args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.port is not None and not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    if args.command == "demo":
+        client = args.args or ["tui"]
+        if client not in (["tui"], ["web"]):
+            parser.error("use demo [tui|web]")
+        try:
+            demo(client[0], args.port or 0)
+        except KeyboardInterrupt:
+            pass
+        except (OSError, RuntimeError, ValueError) as error:
+            parser.exit(1, f"Could not run fixture journal: {error}\n")
+        return 0
+    port = 8766 if args.port is None else args.port
     args.state.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = {
         "AGENT_JOURNAL_TOKEN": token(args.state / "token"),
-        "AGENT_JOURNAL_URL": f"http://127.0.0.1:{args.port}",
+        "AGENT_JOURNAL_URL": f"http://127.0.0.1:{port}",
         "AGENT_JOURNAL_HOME": str(args.state.resolve()),
     }
     os.environ.update(env)
     if args.command == "seed":
-        seed()
+        from agent_journal.common import Api
+
+        seed(Api())
+        print(FIXTURE)
     elif args.command == "token":
         print(env["AGENT_JOURNAL_TOKEN"])
     else:
-        cli = (
-            ["serve", "--port", str(args.port)]
-            if args.command == "serve"
-            else args.args
-        )
+        cli = ["serve", "--port", str(port)] if args.command == "serve" else args.args
         executable = Path(sys.executable).with_name("agent-journal")
         os.execv(executable, [str(executable), *cli])
     return 0
