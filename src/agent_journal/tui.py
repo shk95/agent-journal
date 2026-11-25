@@ -18,6 +18,9 @@ STATE = {
 }
 PAGE_SIZE = 60
 OBSERVATION = {"unavailable": "Observer offline", "stopped": "Recording stopped"}
+CLICK = curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED
+WHEEL_UP = curses.BUTTON4_PRESSED
+WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0)
 
 
 def fit(text, n):
@@ -41,6 +44,33 @@ def write(win, y, x, text, width, style=0):
         pass
 
 
+def draw_buttons(win, y, width, options, hits, active=()):
+    x = 0
+    for label, key in options:
+        label = f"[{label}]"
+        end = x + len(label)
+        if end > width:
+            break
+        style = curses.A_REVERSE if key in active else curses.A_BOLD
+        write(win, y, x, label, len(label), style)
+        hits.update(((y, col), key) for col in range(x, end))
+        x = end + 1
+
+
+def mouse_event():
+    try:
+        _, x, y, _, state = curses.getmouse()
+    except curses.error:
+        return None
+    if state & CLICK:
+        return x, y, 0
+    if state & WHEEL_UP:
+        return x, y, curses.KEY_UP
+    if state & WHEEL_DOWN:
+        return x, y, curses.KEY_DOWN
+    return None
+
+
 def entry(win, title):
     h, w = win.getmaxyx()
     win.move(h - 2, 0)
@@ -50,11 +80,14 @@ def entry(win, title):
     win.clrtoeol()
     win.refresh()
     curses.echo()
+    _, mouse = curses.mousemask(0)
     win.timeout(-1)
     try:
         return win.getstr(h - 1, 0, 2048).decode().strip()
     finally:
         curses.noecho()
+        if mouse:
+            curses.mousemask(mouse)
         win.timeout(300)
 
 
@@ -65,12 +98,15 @@ def choose_note(win, candidates):
         while True:
             h, w = win.getmaxyx()
             win.erase()
+            hits = {}
+            draw_buttons(win, 0, w - 1, [("Cancel", 27)], hits)
             write(
-                win, 0, 0, "Edit a note · j/k select · Enter edit · Esc cancel", w - 1
+                win, 0, 10, "Edit a note · j/k select · Enter edit · Esc cancel", w - 11
             )
             count = max(1, h - 2)
             top = max(0, selected - count + 1)
-            for index, note in enumerate(candidates[top : top + count], top):
+            rows = candidates[top : top + count]
+            for index, note in enumerate(rows, top):
                 label = "Turn" if note["turn"] else "Project"
                 write(
                     win,
@@ -82,6 +118,16 @@ def choose_note(win, candidates):
                 )
             win.refresh()
             key = win.getch()
+            if key == curses.KEY_MOUSE:
+                event = mouse_event()
+                if event is None:
+                    continue
+                x, y, key = event
+                if not key and 0 <= x < w - 1:
+                    if (y, x) in hits:
+                        key = hits[y, x]
+                    elif 1 <= y <= len(rows):
+                        return rows[y - 1]
             if key == 27:
                 return None
             if key in (10, 13):
@@ -114,14 +160,17 @@ def edit_body(win, body):
             win.refresh()
 
 
-def show(win, api, project):
+def show(win, api, project, mouse):
     try:
         curses.curs_set(0)
     except curses.error:
         pass
+    if mouse:
+        curses.mousemask(CLICK | (WHEEL_UP | WHEEL_DOWN if WHEEL_DOWN else 0))
     win.timeout(300)
     turns, notes, selected, detail = [], [], None, None
     offset, last, message = 0, 0, ""
+    top, project_offset = 0, 0
     visible = [True, True, True]
     before, has_older = "", False
     while True:
@@ -143,11 +192,37 @@ def show(win, api, project):
         h, w = win.getmaxyx()
         win.erase()
         write(win, 0, 0, project, w - 1, curses.A_BOLD)
+        if h < 8 or w < 25:
+            if h > 1:
+                write(win, 1, 0, "Enlarge the pane · q quit", w - 1)
+            win.refresh()
+            if win.getch() == ord("q"):
+                return
+            continue
+        hits, turn_rows, project_rows = {}, {}, {}
         if detail is not None:
-            write(win, 1, 0, "Transcript · j/k scroll · Esc close", w - 1)
-            for i, line in enumerate(detail[offset : offset + max(1, h - 3)]):
+            draw_buttons(win, 1, w - 1, [("Close", 27)], hits)
+            write(win, 1, 8, "Transcript · j/k scroll · Esc close", w - 9)
+            offset = min(offset, max(0, len(detail) - (h - 3)))
+            for i, line in enumerate(detail[offset : offset + h - 3]):
                 write(win, i + 2, 0, line, w - 1)
         else:
+            labels = (
+                ("1 Journey", "2 Turn notes", "3 Project notes")
+                if w >= 47
+                else ("1 Journey", "2 Turn", "3 Project")
+                if w >= 34
+                else ("1", "2", "3")
+            )
+            column_keys = (ord("1"), ord("2"), ord("3"))
+            draw_buttons(
+                win,
+                1,
+                w - 1,
+                zip(labels, column_keys),
+                hits,
+                active=[key for enabled, key in zip(visible, column_keys) if enabled],
+            )
             weights = [2 * visible[0], int(visible[1]), int(visible[2])]
             total = sum(weights)
             split = w * weights[0] // total
@@ -160,45 +235,75 @@ def show(win, api, project):
                     continue
                 write(win, 2, x, label, w - x - 1, curses.A_BOLD)
             height = max(1, (h - 5) // 2)
-            top = max(0, idx - height + 1)
+            top = max(0, idx - height + 1, min(top, idx, len(keys) - height))
             free = [n for n in notes if not n["turn"]]
-            for i, n in enumerate(free[-height:]):
-                write(win, 3 + 2 * i, second, n["body"], w - second - 1)
+            max_project_offset = max(0, len(free) - height)
+            project_offset = min(project_offset, max_project_offset)
+            if visible[2]:
+                end = len(free) - project_offset
+                for i, n in enumerate(free[max(0, end - height) : end]):
+                    y = 3 + 2 * i
+                    write(win, y, second, n["body"], w - second - 1)
+                    project_rows[y] = n
             graph_width = min(
                 max(0, (split - 14) // 2),
                 max((len(r["graph"]) for r in turns), default=0),
             )
             for i, r in enumerate(turns[top : top + height]):
                 y = 3 + 2 * i
-                style = curses.A_REVERSE if top + i == idx else 0
+                focused = top + i == idx
+                pointer = ">" if focused else " "
+                style = curses.A_REVERSE if focused else 0
                 marker = r["graph"][:graph_width].ljust(graph_width)
                 write(
                     win,
                     y,
                     0,
-                    f"{marker} {r['thread'][-5:]}  {r['prompt']}",
+                    f"{pointer}{marker} {r['thread'][-5:]}  {r['prompt']}",
                     split - 1,
                     style,
                 )
                 status = OBSERVATION.get(r.get("observation"), STATE[r["status"]])
                 write(win, y + 1, 2, f"{status} · {r['summary']}", split - 3)
                 attached = [
-                    n["body"]
+                    n
                     for n in notes
                     if (n["thread"], n["turn"]) == (r["thread"], r["turn"])
                 ]
-                write(win, y, split, " / ".join(attached), second - split - 1)
-                if not visible[0] and visible[1] and top + i == idx:
+                write(
+                    win,
+                    y,
+                    split,
+                    " / ".join(n["body"] for n in attached),
+                    second - split - 1,
+                )
+                turn_rows[y] = (keys[top + i], attached)
+                turn_rows[y + 1] = (keys[top + i], [])
+                if not visible[0] and visible[1]:
                     write(
                         win,
                         y + 1,
                         split,
-                        r["prompt"],
+                        f"{pointer} {r['prompt']}",
                         second - split - 1,
-                        curses.A_REVERSE,
+                        style,
                     )
             if not turns and visible[0]:
                 write(win, 4, 0, "No recorded turns yet", max(1, split - 1))
+            action_labels = (
+                ("Transcript", "+ Turn note", "+ Project note", "Older", "Latest")
+                if w >= 61
+                else ("Open", "+ Turn", "+ Project", "<", ">")
+                if w >= 38
+                else ("Open", "+T", "+P", "<", ">")
+            )
+            draw_buttons(
+                win,
+                h - 2,
+                w - 1,
+                zip(action_labels, (10, ord("m"), ord("n"), ord("b"), ord("g"))),
+                hits,
+            )
             write(
                 win,
                 h - 1,
@@ -209,13 +314,40 @@ def show(win, api, project):
             )
         win.refresh()
         key = win.getch()
+        note_choices = None
+        if key == curses.KEY_MOUSE:
+            event = mouse_event()
+            if event is None:
+                continue
+            x, y, key = event
+            if not (0 <= x < w - 1 and 0 <= y < h):
+                continue
+            if not key:
+                key = hits.get((y, x), 0)
+                if detail is None and not key:
+                    if visible[2] and x >= second and y in project_rows:
+                        key, note_choices = ord("e"), [project_rows[y]]
+                    elif x < second and y in turn_rows:
+                        selected, attached = turn_rows[y]
+                        if x >= split and attached:
+                            key, note_choices = ord("e"), attached
+            elif detail is None and 3 <= y < h - 2:
+                step = 1 if key == curses.KEY_DOWN else -1
+                if visible[2] and x >= second:
+                    project_offset = max(
+                        0, min(project_offset - step, max_project_offset)
+                    )
+                    continue
+                top = max(0, min(top + step, len(keys) - height))
+            elif detail is None:
+                continue
         if key == ord("q"):
             return
         if detail is not None:
             if key in (27, 10, 13):
                 detail, offset = None, 0
             elif key in (ord("j"), curses.KEY_DOWN):
-                offset = min(offset + 1, max(0, len(detail) - max(1, h - 3)))
+                offset = min(offset + 1, max(0, len(detail) - (h - 3)))
             elif key in (ord("k"), curses.KEY_UP):
                 offset = max(0, offset - 1)
             continue
@@ -223,6 +355,10 @@ def show(win, api, project):
             col = key - ord("1")
             if not visible[col] or sum(visible) > 1:
                 visible[col] = not visible[col]
+        elif key in (ord("j"), curses.KEY_DOWN) and visible == [False, False, True]:
+            project_offset = max(0, project_offset - 1)
+        elif key in (ord("k"), curses.KEY_UP) and visible == [False, False, True]:
+            project_offset = min(project_offset + 1, max_project_offset)
         elif key in (ord("j"), curses.KEY_DOWN) and keys:
             selected = keys[min(len(keys) - 1, idx + 1)]
         elif key in (ord("k"), curses.KEY_UP) and keys:
@@ -251,12 +387,19 @@ def show(win, api, project):
                                 textwrap.wrap(line, max(1, (w - 1) // 2)) or [""]
                             )
                 elif key == ord("e"):
-                    candidates = [
-                        n
-                        for n in notes
-                        if n["turn"] is None or (n["thread"], n["turn"]) == selected
-                    ]
-                    note = choose_note(win, candidates) if candidates else None
+                    if note_choices is None:
+                        candidates = [
+                            n
+                            for n in notes
+                            if n["turn"] is None or (n["thread"], n["turn"]) == selected
+                        ]
+                        note = choose_note(win, candidates) if candidates else None
+                    else:
+                        note = (
+                            note_choices[0]
+                            if len(note_choices) == 1
+                            else choose_note(win, note_choices)
+                        )
                     if note:
                         body = edit_body(win, note["body"])
                         if body:
@@ -283,5 +426,10 @@ def show(win, api, project):
                 message = str(e)
 
 
-def run(api, project):
-    curses.wrapper(show, api, project)
+def run(api, project, *, mouse=True):
+    if not (os.isatty(0) and os.isatty(1)):
+        raise ValueError("Open the terminal journal in an interactive terminal")
+    try:
+        curses.wrapper(show, api, project, mouse)
+    except curses.error as exc:
+        raise RuntimeError(f"Could not use the terminal: {exc}") from exc

@@ -9,10 +9,10 @@ The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (
 ```sh
 nix profile add 'github:shk95/agent-journal#client'
 agent-journal connect --url https://journal.example.com
-agent-journal tui
+agent-journal
 ```
 
-Older Nix versions use `nix profile install`. To run the client directly, use `nix run 'github:shk95/agent-journal#client' -- tui`. From a local checkout, use `nix run .#client -- tui` or `nix flake check` to verify the package.
+Older Nix versions use `nix profile install`. To run the client directly, use `nix run 'github:shk95/agent-journal#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
 
 The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and summaries use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
 
@@ -59,17 +59,21 @@ Start one observer per work machine, then run Codex as usual from the repository
 agent-journal observe
 ```
 
-Open the terminal client from a second pane in the same repository.
+Open the terminal client from a second pane in the same repository. It reads the GitHub `origin` from the current checkout, including from a subdirectory. To select a different project, run `agent-journal tui --project OWNER/REPO`.
 
 ```sh
-agent-journal tui
+agent-journal
 ```
 
 - Toggle Journey, Turn notes, and Project notes with `1`, `2`, and `3`.
 - Select a turn with `j/k`, open its transcript with `Enter`, and return with `Esc`.
 - Use `m` for a turn note and `n` for a project note.
 - Use `e` to select a note and open it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
-- Open the server address in a browser and sign in with the token. Select a project to read its journal and select a turn to read its transcript.
+- Click a turn to select it, a note to edit it, or a bracketed control to run its action. Scroll over the Journey, Project notes, or an open transcript with the wheel where the terminal and curses support it.
+
+Mouse input is enabled by default. In tmux, enable forwarding with `set -g mouse on`. Use `agent-journal tui --no-mouse` to leave mouse selection to the terminal or tmux.
+
+Run `agent-journal web` to open the overview in your browser, or `agent-journal web --project OWNER/REPO` to open a project directly. The command prints the URL for use in another browser or on a remote terminal. Sign in to the web journal with the server access token.
 
 Use `agent-journal projects` to see the registration state. Use `agent-journal disable` to stop collecting turns for the current project. You can still read the recorded history.
 
@@ -110,7 +114,7 @@ uv run --locked python scripts/dev.py seed
 uv run --locked python scripts/dev.py client tui --project example/journal-fixture
 ```
 
-Open `http://127.0.0.1:8766` in a browser. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
+Open the development web journal with `uv run --locked python scripts/dev.py client web`. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
 
 To try your normal Codex workflow against the development server, register a GitHub repository and start the observer in a separate pane.
 
@@ -134,7 +138,7 @@ uv build
 
 ### Local Codex and client smoke test
 
-Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. It checks a running turn and its final summary, a Codex MCP note on the previous turn, a TUI note that appears in the browser, and a browser edit that appears in the TUI. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, Git checkout, sockets and a generated journal token.
+Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. It checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It also opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, a Git checkout, sockets, and a generated journal token.
 
 ```sh
 uv run --locked --with playwright==1.65.2 python -m playwright install chromium

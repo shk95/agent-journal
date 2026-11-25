@@ -12,6 +12,7 @@ from uuid import UUID
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
+from agent_journal.cli import main
 from agent_journal.common import OBSERVATION_LEASE, Api, repo_key
 from agent_journal.mcp_server import make_mcp
 from agent_journal.observer import Cache, scan
@@ -96,6 +97,35 @@ class TestJournal(unittest.TestCase):
 
     def rows(self):
         return self.api.request("journey", project="test/p")
+
+    def test_web_command_opens_configured_journal(self):
+        for options, fragment in (
+            ([], ""),
+            (["--project", "Test/P"], "#test%2Fp"),
+        ):
+            with (
+                self.subTest(options=options),
+                patch.object(sys, "argv", ["agent-journal", "web", *options]),
+                patch("webbrowser.open_new_tab") as open_tab,
+                patch("builtins.print") as print_url,
+            ):
+                main()
+                url = self.api.base + "/" + fragment
+                open_tab.assert_called_once_with(url)
+                print_url.assert_called_once_with(url, flush=True)
+
+    def test_tui_command_can_disable_mouse(self):
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["agent-journal", "tui", "--project", "Test/P", "--no-mouse"],
+            ),
+            patch("agent_journal.tui.run") as run,
+        ):
+            main()
+        self.assertEqual(run.call_args.args[1], "test/p")
+        self.assertEqual(run.call_args.kwargs, {"mouse": False})
 
     def test_scope_fork_history_and_note(self):
         scan(self.source, self.cache)

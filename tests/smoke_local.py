@@ -3,6 +3,7 @@
 import argparse
 import ast
 import contextlib
+import curses
 import json
 import os
 import re
@@ -29,6 +30,8 @@ SUMMARY = "Verified the sample import."
 NOTE = "Keep a regression case."
 EDIT = "Keep the regression fixture with the import."
 PROJECT_NOTE = "Review other import formats later."
+MOUSE_NOTE = "Keep the input in the example."
+MOUSE_EDIT = "Save the input with its example."
 
 
 class FixtureModel(BaseHTTPRequestHandler):
@@ -173,11 +176,17 @@ def start_turn(codex, session, request):
     )["turn"]["id"]
 
 
-def check_clients(path, cli, env, api, channel):
+def check_clients(path, repo, cli, env, api, channel):
     from playwright.sync_api import sync_playwright
 
     tmux = ["tmux", "-S", str(path / "tm")]
-    tui = shlex.join([str(cli), "tui", "--project", PROJECT])
+    nested = repo / "nested"
+    nested.mkdir()
+    editor = path / "editor"
+    editor.write_text(
+        "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(MOUSE_EDIT) + ' > "$1"\n'
+    )
+    editor.chmod(0o700)
     subprocess.run(
         tmux
         + [
@@ -191,10 +200,12 @@ def check_clients(path, cli, env, api, channel):
             "125",
             "-y",
             "30",
-            tui,
+            "-c",
+            str(nested),
+            shlex.quote(str(cli)),
         ],
         check=True,
-        env=env | {"TERM": "xterm-256color"},
+        env=env | {"TERM": "xterm-256color", "VISUAL": str(editor)},
     )
 
     def screen():
@@ -202,9 +213,99 @@ def check_clients(path, cli, env, api, channel):
             tmux + ["capture-pane", "-p", "-t", "journal"], text=True
         )
 
+    def mouse(button, x, y, click=False):
+        sgr = (
+            subprocess.check_output(
+                tmux + ["display-message", "-p", "-t", "journal", "#{mouse_sgr_flag}"],
+                text=True,
+            ).strip()
+            == "1"
+        )
+        if sgr:
+            position = f"\x1b[<{button};{x + 1};{y + 1}".encode()
+            event = position + b"M"
+            if click:
+                event += position + b"m"
+        else:
+            position = bytes((x + 33, y + 33))
+            event = b"\x1b[M" + bytes((button + 32,)) + position
+            if click:
+                event += b"\x1b[M#" + position
+        subprocess.run(
+            tmux
+            + ["send-keys", "-H", "-t", "journal", *[f"{byte:02x}" for byte in event]],
+            check=True,
+        )
+
+    def click_label(label):
+        y, line = next(
+            (i, row) for i, row in enumerate(screen().splitlines()) if label in row
+        )
+        mouse(0, line.index(label), y, click=True)
+
+    def selected(prompt):
+        return any(
+            row.startswith(">") and prompt in row for row in screen().splitlines()
+        )
+
     try:
-        wait_for("the TUI journey", lambda: TASK in screen())
+        wait_for("the TUI journey for the current checkout", lambda: TASK in screen())
+        if screen().splitlines()[0] != PROJECT:
+            raise RuntimeError("The default TUI did not select the checkout's project")
         target = tmux + ["send-keys", "-t", "journal"]
+        click_label("[1 Journey]")
+        wait_for(
+            "the hidden Journey column",
+            lambda: "Journey" not in screen().splitlines()[2],
+        )
+        click_label("[1 Journey]")
+        wait_for(
+            "the restored Journey column", lambda: "Journey" in screen().splitlines()[2]
+        )
+        turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
+        mouse(0, 1, turn_row, click=True)
+        wait_for("the selected turn", lambda: selected(TASK))
+        click_label("[Transcript]")
+        wait_for("the clicked turn's transcript", lambda: ANSWER in screen())
+        click_label("[Close]")
+        wait_for("the closed transcript", lambda: "[Transcript]" in screen())
+        if hasattr(curses, "BUTTON5_PRESSED"):
+            mouse(65, 1, turn_row)
+            wait_for("the turn after scrolling down", lambda: selected(NOTE_TASK))
+            click_label("[Transcript]")
+            wait_for(
+                "the open transcript after scrolling down",
+                lambda: NOTE_TASK in screen() and "[Close]" in screen(),
+            )
+            mouse(65, 1, 3)
+            wait_for(
+                "the transcript scrolled down", lambda: screen().splitlines()[2] == "{"
+            )
+            mouse(64, 1, 3)
+            wait_for(
+                "the transcript scrolled back",
+                lambda: screen().splitlines()[2] == "[userMessage]",
+            )
+            click_label("[Close]")
+            wait_for(
+                "the journey after scrolling down", lambda: "[Transcript]" in screen()
+            )
+            mouse(64, 1, turn_row)
+            wait_for("the turn after scrolling up", lambda: selected(TASK))
+        click_label("[+ Turn note]")
+        wait_for(
+            "the clicked turn note input", lambda: "Empty line cancels" in screen()
+        )
+        subprocess.run(target + ["-l", MOUSE_NOTE], check=True)
+        subprocess.run(target + ["Enter"], check=True)
+        first_turn = api.request("journey", project=PROJECT)[0]["turn"]
+        wait_for(
+            "the clicked turn's saved note",
+            lambda: any(
+                note["turn"] == first_turn and note["body"] == MOUSE_NOTE
+                for note in api.request("notes", project=PROJECT)
+            ),
+        )
         subprocess.run(target + ["n"], check=True)
         wait_for("the TUI note input", lambda: "Empty line cancels" in screen())
         subprocess.run(target + ["-l", PROJECT_NOTE], check=True)
@@ -246,8 +347,18 @@ def check_clients(path, cli, env, api, channel):
         wait_for(
             "the edited note in the TUI", lambda: "Keep the regression" in screen()
         )
+        # The note display is clipped to the column width, but the whole row opens it.
+        mouse(0, 110, 3, click=True)
+        wait_for(
+            "the project note edited by mouse",
+            lambda: any(
+                note["body"] == MOUSE_EDIT and note["turn"] is None
+                for note in api.request("notes", project=PROJECT)
+            ),
+        )
+        subprocess.run(target + ["q"], check=True)
     finally:
-        subprocess.run(tmux + ["kill-server"], check=True)
+        subprocess.run(tmux + ["kill-server"], check=False, capture_output=True)
 
 
 def smoke(path, binary, channel):
@@ -411,7 +522,7 @@ def smoke(path, binary, channel):
                         ("add_note", "completed"),
                     ]:
                         raise RuntimeError(f"Codex MCP calls did not complete: {calls}")
-                check_clients(path, cli, environment, api, channel)
+                check_clients(path, repo, cli, environment, api, channel)
         finally:
             provider.shutdown()
 

@@ -34,7 +34,10 @@ def verified(project):
 
 
 def main():
-    p = argparse.ArgumentParser(prog="agent-journal")
+    p = argparse.ArgumentParser(
+        prog="agent-journal",
+        description="Open the terminal journal for the current GitHub checkout.",
+    )
     commands = p.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -45,8 +48,13 @@ def main():
     snapshot = commands.add_parser("backup")
     snapshot.add_argument("--database", type=Path)
     snapshot.add_argument("--output", type=Path, required=True)
-    for name in ("register", "disable", "tui"):
+    for name in ("register", "disable"):
         commands.add_parser(name).add_argument("--project", metavar="OWNER/REPO")
+    tui = commands.add_parser("tui", help="open the terminal journal")
+    tui.add_argument("--project", metavar="OWNER/REPO")
+    tui.add_argument("--no-mouse", action="store_true", help="disable mouse input")
+    web = commands.add_parser("web", help="open the web journal in a browser")
+    web.add_argument("--project", metavar="OWNER/REPO")
     commands.add_parser("projects")
     connect = commands.add_parser("connect")
     connect.add_argument("--url", required=True)
@@ -57,7 +65,7 @@ def main():
     watch.add_argument("--socket", type=Path)
     watch.add_argument("--interval", type=float, default=3)
     watch.add_argument("--once", action="store_true")
-    args = p.parse_args()
+    args = p.parse_args(sys.argv[1:] or ["tui"])
     try:
         if args.command == "backup":
             from .backup import backup
@@ -92,7 +100,23 @@ def main():
                 print(f"Journal listening on {server.server_address}", flush=True)
                 server.serve_forever()
             return
+        if args.command == "tui":
+            from .tui import run
+
+            project = current(args.project)
+            run(Api(), project, mouse=not args.no_mouse)
+            return
         api = Api()
+        if args.command == "web":
+            import webbrowser
+            from urllib.parse import quote
+
+            url = api.base + "/"
+            if args.project:
+                url += "#" + quote(current(args.project), safe="")
+            print(url, flush=True)
+            webbrowser.open_new_tab(url)
+            return
         if args.command == "projects":
             for row in api.request("projects"):
                 print(row["project"], "active" if row["active"] else "disabled")
@@ -121,10 +145,6 @@ def main():
             finally:
                 stop.set()
                 cache.db.close()
-        elif args.command == "tui":
-            from .tui import run
-
-            run(api, current(args.project))
         else:
             key = current(args.project)
             if args.command == "register":

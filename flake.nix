@@ -99,6 +99,7 @@
             client="${self.packages.${system}.client}/bin/agent-journal"
             "$client" --help
             "$client" tui --help
+            "$client" web --help
             "$client" observe --help
             "$client" mcp --help
             AGENT_JOURNAL_HOME="$TMPDIR/journal" AGENT_JOURNAL_TOKEN=fixture \
