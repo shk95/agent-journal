@@ -32,13 +32,13 @@ An existing manually managed `agent-journal.service` requires a separate migrati
 Run the [local checks](SETUP.md#local-development) before tagging. On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Push a tag that matches that version.
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The release workflow checks the public history and verifies the Nix outputs and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
-Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.2.0#client' -- tui` runs that release's client.
+Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.3.0#client' -- tui` runs that release's client.
 
 The timer checks every 15 minutes for a stable `vX.Y.Z` release with a server manifest and a version newer than the installed package. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
 
