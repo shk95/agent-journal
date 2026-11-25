@@ -220,6 +220,7 @@ def make_mcp(api=None, default_project=None, socket=None):
                 notes = journal.request("notes", **query, axis=kind)
                 result[axis] = [
                     {k: note[k] for k in ("id", "thread", "turn", "body")}
+                    | ({"title": note["title"]} if note.get("title") else {})
                     for note in notes
                 ]
         return result
@@ -239,9 +240,11 @@ def make_mcp(api=None, default_project=None, socket=None):
         project: str | None = None,
         thread: str | None = None,
         turn: str | None = None,
+        title: str | None = None,
     ) -> dict[str, Any]:
         """Write a user-requested note. Supply both target IDs for a turn note or omit both
-        for a project note. Reuse request_id on retry.
+        for a project note. Put the title in a Markdown heading in the body.
+        Reuse request_id on retry.
         """
         journal = connection()
         key = resolve(journal, project)
@@ -255,7 +258,7 @@ def make_mcp(api=None, default_project=None, socket=None):
                 "body": body,
                 "thread": thread,
                 "turn": turn,
-            },
+            } | ({"title": title} if title is not None else {}),
         )
         return {"project": key, "thread": thread, "turn": turn, **saved}
 

@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from contextlib import suppress
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -166,31 +167,54 @@ def main():
             codex_hook()
             return
         if args.command == "serve":
+            from .client_state import write_state
             from .server import make_server
 
-            with make_server(
-                args.host,
-                args.port,
-                args.database or state_dir() / "server.sqlite3",
-                os.environ.get("AGENT_JOURNAL_TOKEN", ""),
-                deployment_id=(
-                    args.deployment_id_file.read_text(encoding="utf-8").strip()
-                    if args.deployment_id_file
-                    else None
-                ),
-                maintenance_file=args.maintenance_file,
-            ) as server:
+            status_path = os.environ.get("AGENT_JOURNAL_DEPLOYMENT_STATE")
+            status = Path(status_path) if status_path else None
+            if status:
+                status.unlink(missing_ok=True)
+            try:
+                server = make_server(
+                    args.host,
+                    args.port,
+                    args.database or state_dir() / "server.sqlite3",
+                    os.environ.get("AGENT_JOURNAL_TOKEN", ""),
+                    deployment_id=(
+                        args.deployment_id_file.read_text(encoding="utf-8").strip()
+                        if args.deployment_id_file
+                        else None
+                    ),
+                    maintenance_file=args.maintenance_file,
+                    deployment_probe_key=os.environ.get("AGENT_JOURNAL_DEPLOYMENT_KEY"),
+                )
+            except (OSError, ValueError, sqlite3.Error) as error:
+                if status:
+                    sqlite_code = getattr(error, "sqlite_errorcode", 0) & 255
+                    transient = isinstance(error, OSError) or sqlite_code in {
+                        sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_NOMEM,
+                        sqlite3.SQLITE_READONLY, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_FULL,
+                        sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_PERM,
+                    }
+                    with suppress(OSError):
+                        write_state(status, {
+                            "phase": "migration" if isinstance(error, sqlite3.Error) else "startup",
+                            "reason": str(error), "transient": transient,
+                        })
+                raise
+            with server:
                 print(f"Journal listening on {server.server_address}", flush=True)
                 server.serve_forever()
             return
         if args.command == "tui":
+            from .client_state import ClientState
             from .tui import run
 
             project = current(args.project)
             api, projects = client_connection()
-            if projects is None:
+            if projects is None and not ClientState(api, project).has_cache():
                 projects = api.request("projects")
-            if not any(row["project"] == project for row in projects):
+            if projects is not None and not any(row["project"] == project for row in projects):
                 raise ValueError(
                     f"{project} is not registered. Ask Codex to register it with Agent Journal."
                 )

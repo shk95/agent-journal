@@ -14,9 +14,20 @@ function statusLabel(row) {
   return labels[row.status];
 }
 const axes = ["Journey", "Turn notes", "Project notes"];
+const pageKeys = { "[": "earlier", "]": "later", "<": "first", ">": "last" };
 const visible = new Set(axes);
 const pageSize = 60;
-let before = "";
+let pageQuery = {};
+let legacyNewerPages = [];
+let activeAxis = 0;
+let selectedJourneySession = null;
+let journeyFilter = null;
+let sessionControls = null;
+let activeRequest = null;
+let modalTrigger = null;
+let detailRequest = null;
+const readCache = new Map();
+const detailCache = new Map();
 let last = "",
   version = 0;
 function node(tag, text, cls) {
@@ -27,78 +38,95 @@ function node(tag, text, cls) {
 }
 function action(text, fn, cls) {
   const el = node("button", text, cls);
+  el.type = "button";
   el.onclick = () =>
-    Promise.resolve(fn()).catch(
+    Promise.resolve().then(fn).catch(
       (err) => ($("connection").textContent = err.message),
     );
   return el;
 }
-async function api(path, params = {}, body) {
+class JournalError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+async function api(path, params = {}, body, signal) {
   const res = await fetch(
     "/api/" + path + "?" + new URLSearchParams(params),
-    body
-      ? {
+    {
+      signal,
+      ...(body ? {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json; charset=utf-8" },
           body: JSON.stringify(body),
-        }
-      : {},
+        } : {}),
+    },
   );
   if (res.status === 401) {
     $("login").hidden = false;
     $("view").hidden = true;
-    throw new Error("Enter your access token");
+    throw new JournalError(401, "Enter your access token");
   }
-  if (!res.ok) throw new Error((await res.json()).error);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new JournalError(res.status, data.error || "Journal HTTP " + res.status);
+  }
   return res.json();
 }
 function modal(title, child) {
+  const dialog = $("detail");
+  detailRequest?.abort();
+  detailRequest = null;
+  delete $("modalTitle").dataset.priority;
   $("modalTitle").textContent = title;
   $("modalBody").replaceChildren(child);
-  $("detail").showModal();
+  dialog.onkeydown = null;
+  if (!dialog.open) {
+    modalTrigger = document.activeElement;
+    dialog.showModal();
+  }
 }
-function editNote(project, target = {}, note = null) {
-  const form = node("form"),
-    area = node("textarea"),
-    submit = node("button", "Save"),
-    err = node("p");
-  area.required = true;
-  area.value = note?.body ?? "";
-  area.setAttribute("aria-label", "Note text");
-  const id = note?.id ?? crypto.randomUUID();
-  form.append(area, submit, err);
-  form.onsubmit = async (ev) => {
-    ev.preventDefault();
-    submit.disabled = true;
-    try {
-      const payload = { project, id, body: area.value };
-      if (note) await api("edit-note", {}, { ...payload, version: note.version });
-      else await api("notes", {}, { ...payload, ...target });
-      $("detail").close();
-      last = "";
-      await refresh();
-    } catch (e) {
-      err.textContent = e.message;
-    } finally {
-      submit.disabled = false;
-    }
-  };
-  modal(note ? "Edit note" : (target.turn ? "Add turn note" : "Add project note"), form);
-  area.focus();
+function finishNoteEditing() {
+  const editor = activeNoteEditor;
+  activeNoteEditor = null;
+  editor?.leaving();
+}
+function closeJournalDialog() {
+  detailRequest?.abort();
+  finishNoteEditing();
+  $("detail").close();
 }
 async function transcript(project, r) {
   const box = node("div");
-  for (const item of await api("transcript", {
-    project,
-    thread: r.thread,
-    turn: r.turn,
-  })) {
-    box.append(
-      node("h2", item.type),
-      node("pre", item.text ?? JSON.stringify(item, null, 2)),
-    );
-  }
+  box.append(node("p", "Loading transcript…"));
   modal("Transcript", box);
+  const key = JSON.stringify([project, r.thread, r.turn, r.revision]);
+  try {
+    let items = r.revision == null ? null : detailCache.get(key);
+    if (!items) {
+      detailRequest = new AbortController();
+      items = await api("transcript", { project, thread: r.thread, turn: r.turn }, undefined, detailRequest.signal);
+      if (r.revision != null) {
+        if (detailCache.size >= 6) detailCache.delete(detailCache.keys().next().value);
+        detailCache.set(key, items);
+      }
+    }
+    if (!box.isConnected || !$("detail").open) return;
+    box.replaceChildren();
+    function renderItems(start) {
+      if (!box.isConnected || !$("detail").open) return;
+      for (const item of items.slice(start, start + 8)) {
+        box.append(node("h2", item.type), node("pre", item.text ??
+          (item.aggregatedOutput ? (item.command ?? "") + "\n" + item.aggregatedOutput :
+            JSON.stringify(item, null, 2))));
+      }
+      if (start + 8 < items.length) requestAnimationFrame(() => renderItems(start + 8));
+    }
+    renderItems(0);
+  } catch (error) {
+    if (box.isConnected && error.name !== "AbortError") box.textContent = error.message;
+  }
 }
 function projectLink(k) {
   const a = node("a", k);
@@ -107,7 +135,16 @@ function projectLink(k) {
 }
 function noteView(project, note) {
   const el = node("div", undefined, "note");
-  el.append(node("div", note.body), action("Edit", () => editNote(project, {}, note), "small"));
+  const title = displayTitle(note);
+  const open = action(title, () => openNote(project, note), "note-title");
+  styleNoteTitle(open, note);
+  open.dataset.axis = note.turn ? "1" : "2";
+  open.dataset.identity = note.id;
+  el.append(open);
+  const preview = note.preview ?? note.body;
+  if (preview?.trim().normalize("NFC") !== title)
+    el.append(node("div", preview, "note-excerpt"));
+  el.append(action("Edit", () => editNote(project, {}, note), "small"));
   return el;
 }
 function overview(entries) {
@@ -295,6 +332,10 @@ function board(project, rows, notes) {
     grid = node("div", undefined, "board");
   if (!cols.length) return node("p", "Select a column to show.", "empty");
   const journeyVisible = visible.has("Journey");
+  const turnNotesVisible = visible.has("Turn notes");
+  const paired = journeyVisible && turnNotesVisible;
+  const hasGraph = journeyVisible && rows.length > 0;
+  const recordsLayout = (paired ? " paired" : "") + (hasGraph ? " with-graph" : "");
   if (journeyVisible) {
     const laneCount = Math.max(
       1,
@@ -302,34 +343,74 @@ function board(project, rows, notes) {
     );
     grid.style.setProperty("--lane-count", laneCount);
   }
-  grid.style.gridTemplateColumns = cols
-    .map((axis) =>
-      axis === "Journey"
-        ? "minmax(calc(190px + var(--graph-width)),2fr)"
-        : "minmax(135px,1fr)",
-    )
-    .join(" ");
-  function put(el, name, row) {
-    el.style.gridColumn = String(cols.indexOf(name) + 1);
-    el.style.gridRow = String(row);
-    grid.append(el);
+  function pane(names) {
+    const journeyPane = names.includes("Journey");
+    const section = node("section", undefined, journeyPane && hasGraph ? "board-pane graph-pane" : "board-pane");
+    const head = node("div", undefined, "pane-head" + (journeyPane ? recordsLayout : ""));
+    const scroll = node("div", undefined, "board-scroll");
+    scroll.tabIndex = 0;
+    scroll.dataset.pane = names.join("+");
+    scroll.setAttribute("role", "region");
+    scroll.setAttribute("aria-label", names.join(" and "));
+    for (const name of names) {
+      const label = node("div", undefined, name === "Journey" && hasGraph ? "head journey-head" : "head");
+      label.append(node("h2", name));
+      if (name === "Project notes")
+        label.append(action("＋", () => editNote(project), "small"));
+      head.append(label);
+    }
+    section.append(head, scroll);
+    grid.append(section);
+    return scroll;
   }
-  for (const a of cols) {
-    const head = node(
-      "div",
-      undefined,
-      a === "Journey" ? "head journey-head" : "head",
-    );
-    head.append(node("h2", a));
-    if (a === "Project notes")
-      head.append(action("＋", () => editNote(project), "small"));
-    put(head, a, 1);
+  const recordAxes = cols.filter(name => name !== "Project notes");
+  const records = recordAxes.length ? pane(recordAxes) : null;
+  const projectPane = visible.has("Project notes") ? pane(["Project notes"]) : null;
+  if (records && projectPane) {
+    grid.classList.add("with-project");
+    grid.style.setProperty("--record-pane-width", paired ? "3fr" : journeyVisible ? "2fr" : "1fr");
   }
   const seenSessions = new Set();
+  const sessionCards = new Map();
+  function highlightSession(event) {
+    if (journeyFilter) return;
+    const thread = event.target.closest(".board-card")?.dataset.session;
+    if (!thread || thread === selectedJourneySession) return;
+    for (const card of sessionCards.get(selectedJourneySession) ?? [])
+      card.classList.remove("selected-session");
+    for (const card of sessionCards.get(thread) ?? [])
+      card.classList.add("selected-session");
+    selectedJourneySession = thread;
+  }
+  if (journeyVisible) {
+    records.addEventListener("focusin", highlightSession);
+    records.addEventListener("click", highlightSession);
+  }
+  const turnNotes = new Map();
+  const projectNotes = [];
+  for (const note of mergeDrafts(project, rows, notes)) {
+    if (!note.turn) {
+      projectNotes.push(note);
+      continue;
+    }
+    const key = JSON.stringify([note.thread, note.turn]);
+    if (!turnNotes.has(key)) turnNotes.set(key, []);
+    turnNotes.get(key).push(note);
+  }
   rows.forEach((r, i) => {
+    if (!records) return;
+    const card = node("article", undefined, "board-card" + recordsLayout);
+    card.dataset.turn = r.turn;
     if (journeyVisible) {
+      card.dataset.session = r.thread;
+      card.style.setProperty("--session-color", sessionColor(r.thread));
+      card.classList.toggle("selected-session", r.thread === (journeyFilter?.thread ?? selectedJourneySession));
+      if (!sessionCards.has(r.thread)) sessionCards.set(r.thread, []);
+      sessionCards.get(r.thread).push(card);
       const cell = node("div", undefined, "cell journey-cell"),
         button = action("", () => transcript(project, r), "rowbtn");
+      button.dataset.axis = "0";
+      button.dataset.identity = JSON.stringify([r.thread, r.turn]);
       const meta = node("div", undefined, "meta");
       const time = new Date(r.started * 1000).toLocaleString("en-US", {
         month: "numeric",
@@ -338,11 +419,9 @@ function board(project, rows, notes) {
         minute: "2-digit",
       });
       const session = node("span", r.thread.slice(-6), "session-id");
-      session.style.color = sessionColor(r.thread);
       session.title = "Session " + r.thread;
       meta.append(
         node("span", time),
-        session,
         node("span", statusLabel(r), statusLabel(r) === labels.inProgress ? "live" : ""),
       );
       if (r.parent && !seenSessions.has(r.thread)) {
@@ -360,21 +439,27 @@ function board(project, rows, notes) {
         meta.append(fork);
       }
       seenSessions.add(r.thread);
+      const title = node("span", undefined, "journey-title");
+      title.append(session, node("span", r.prompt, "req"));
       button.append(
         meta,
-        node("span", r.prompt, "req"),
+        title,
         node("span", r.summary, "result"),
       );
       cell.append(graphGutter(r), button);
-      put(cell, "Journey", i + 2);
+      if (!turnNotesVisible && noteCut?.project === project)
+        cell.append(action("Paste note", () => pasteNote(project, r), "small journey-paste"));
+      card.append(cell);
     }
-    if (visible.has("Turn notes")) {
-      const cell = node("div", undefined, "cell");
+    if (turnNotesVisible) {
+      const cell = node("div", undefined, "cell turn-notes-cell");
       if (!journeyVisible) cell.append(node("small", r.prompt));
-      for (const n of notes.filter(
-        (n) => n.turn === r.turn && n.thread === r.thread,
-      ))
-        cell.append(noteView(project, n));
+      const attached = turnNotes.get(JSON.stringify([r.thread, r.turn])) ?? [];
+      for (const note of attached) {
+        const entry = noteView(project, note);
+        if (!paired) entry.classList.add("note-card");
+        cell.append(entry);
+      }
       cell.append(
         action(
           "+ Note",
@@ -382,116 +467,517 @@ function board(project, rows, notes) {
           "small",
         ),
       );
-      put(cell, "Turn notes", i + 2);
+      if (noteCut?.project === project)
+        cell.append(action("Paste note", () => pasteNote(project, r), "small"));
+      card.append(cell);
     }
+    records.append(card);
   });
-  if (!rows.length && cols.some((x) => x !== "Project notes"))
-    put(
-      node("p", "Waiting for the first recorded turn.", "cell empty"),
-      cols[0],
-      2,
-    );
-  if (visible.has("Project notes")) {
-    const panel = node("div", undefined, "free");
-    for (const n of notes.filter((n) => !n.turn))
-      panel.append(noteView(project, n));
-    put(panel, "Project notes", 2);
-    panel.style.gridRow = "2 / span " + Math.max(1, rows.length);
+  if (records && !rows.length) records.append(node("p",
+    journeyFilter?.mode === "only" ? "No turns for this session." : "Waiting for the first recorded turn.",
+    "cell empty"));
+  if (projectPane) {
+    for (const note of projectNotes) {
+      const card = node("article", undefined, "board-card cell");
+      card.append(noteView(project, note));
+      projectPane.append(card);
+    }
+    if (!projectNotes.length) projectPane.append(node("p", "No project notes yet.", "cell empty"));
   }
   return grid;
 }
-async function refresh() {
-  const current = ++version;
-  try {
-    const storage = isStorageRoute();
-    const key = storage
-      ? new URLSearchParams(location.hash.slice("#stats".length)).get("project") || ""
-      : decodeURIComponent(location.hash.slice(1));
-    let data;
-    if (storage) {
-      data = await api("stats", key ? { project: key } : {});
-    } else if (key) {
-      data = await Promise.all([
-        api("journey", { project: key, limit: pageSize + 1, before, lanes: true }),
-        api("notes", { project: key }),
-      ]);
-    } else {
-      data = await api("overview");
-    }
-    if (current !== version) return;
-    $("login").hidden = true;
-    $("view").hidden = false;
-    $("connection").textContent = "Connected";
-    const sig = JSON.stringify([storage, key, before, [...visible], data]);
-    if (sig === last) return;
-    last = sig;
-    $("crumb").replaceChildren();
-    $("axes").replaceChildren();
-    $("title").textContent = key || (storage ? "Storage" : "Projects");
-    if (key || storage) {
-      const a = node("a", "All projects");
-      a.href = "#";
-      $("crumb").append(a);
-    }
-    if (!storage || key) $("crumb").append(storageLink());
-    if (storage) {
-      $("axes").append(action("Refresh", refresh));
-      $("content").replaceChildren(storageView(data, key));
-      return;
-    }
-    if (key) {
-      for (const axis of axes) {
-        const label = node("label"),
-          cb = node("input");
-        cb.type = "checkbox";
-        cb.checked = visible.has(axis);
-        cb.onchange = () => {
-          cb.checked ? visible.add(axis) : visible.delete(axis);
-          refresh();
-        };
-        label.append(cb, axis);
-        $("axes").append(label);
-      }
-    }
-    if (!key) {
-      $("content").replaceChildren(overview(data));
-      return;
-    }
-    const [turns, notes] = data;
-    const rows = turns.slice(-pageSize);
-    const nav = node("div", undefined, "pagination");
-    if (turns.length > pageSize) {
-      nav.append(action("Earlier turns", () => {
-        const { started, turn, thread } = rows[0];
-        before = JSON.stringify([started, turn, thread]);
-        refresh();
-      }));
-    }
-    if (before) nav.append(action("Latest turns", () => { before = ""; refresh(); }));
-    $("content").replaceChildren(nav, board(key, rows, notes));
 
-  } catch (e) {
-    if (current === version) $("connection").textContent = e.message;
+const boardPrefix = "agent-journal:board:";
+let currentPage = null;
+let browserJump = null;
+let gPending = false;
+
+function route() {
+  const storage = isStorageRoute();
+  const project = storage
+    ? new URLSearchParams(location.hash.slice("#stats".length)).get("project") || ""
+    : decodeURIComponent(location.hash.slice(1));
+  const query = storage ? {} : { ...pageQuery };
+  return { storage, project, query, legacyNewerPages, key: JSON.stringify([storage, project, query]) };
+}
+
+function cachedRead(key) {
+  if (readCache.has(key)) return readCache.get(key);
+  try {
+    const cached = JSON.parse(localStorage.getItem(boardPrefix + key));
+    if (cached) readCache.set(key, cached);
+    return cached;
+  } catch {
+    return null;
   }
 }
-$("home").onclick = () => {
-  location.hash = "";
-};
-$("close").onclick = () => $("detail").close();
-$("auth").onsubmit = async (e) => {
-  e.preventDefault();
+
+function rememberRead(key, data) {
+  const entry = { saved: Date.now(), data };
+  readCache.delete(key);
+  readCache.set(key, entry);
+  while (readCache.size > 12) readCache.delete(readCache.keys().next().value);
+  try {
+    localStorage.setItem(boardPrefix + key, JSON.stringify(entry));
+    const keys = Object.keys(localStorage).filter(name => name.startsWith(boardPrefix));
+    if (keys.length > 12) {
+      const dates = keys.map(name => [name, JSON.parse(localStorage.getItem(name))?.saved ?? 0]);
+      dates.sort((a, b) => a[1] - b[1]);
+      for (const [name] of dates.slice(0, dates.length - 12)) localStorage.removeItem(name);
+    }
+  } catch { /* The current view remains usable when the browser refuses a cache write. */ }
+}
+
+async function readRoute(target, cached, signal) {
+  const { storage, project, query } = target;
+  if (storage) return api("stats", project ? { project } : {}, undefined, signal);
+  if (!project) return api("overview", {}, undefined, signal);
+  const params = cached?.revision ? { project, ...query, revision: cached.revision } : { project, ...query };
+  try {
+    const response = await api("board", params, undefined, signal);
+    return response.unchanged ? cached : response;
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  const journey = before => api("journey", { project, limit: pageSize + 1,
+    before: before ?? "", thread: query.thread ?? "", lanes: true }, undefined, signal);
+  const cachedEdge = query.edge && cached?.legacy && "legacy_before" in cached;
+  let before = cachedEdge ? cached.legacy_before : query.before ?? null;
+  let newerPages = (cachedEdge ? cached.legacy_newer_pages : target.legacyNewerPages).slice();
+  let [batch, notes] = await Promise.all([
+    journey(before),
+    api("notes", { project }, undefined, signal),
+  ]);
+  if (query.edge && !cachedEdge) {
+    // Older servers expose only backward cursors. Keep the pages traversed to get here.
+    const targets = new Set(notes.filter(note => note.turn).map(note => JSON.stringify([note.thread, note.turn])));
+    const latest = batch;
+    let noteEdge;
+    while (query.edge !== "last-note" || targets.size) {
+      if (query.edge.endsWith("-note") && batch.slice(-pageSize).some(row =>
+        targets.has(JSON.stringify([row.thread, row.turn])))) {
+        noteEdge = { before, newerPages: newerPages.slice(), batch };
+        if (query.edge === "last-note") break;
+      }
+      if (batch.length <= pageSize) break;
+      const row = batch.at(-pageSize);
+      const cursor = JSON.stringify([row.started, row.turn, row.thread]);
+      if (cursor === before) throw new Error("The server did not return an older Journey page");
+      newerPages.push(before);
+      before = cursor;
+      batch = await journey(before);
+    }
+    if (noteEdge) ({ before, newerPages, batch } = noteEdge);
+    else if (query.edge.endsWith("-note")) {
+      before = null;
+      newerPages = [];
+      batch = latest;
+    }
+  }
+  return {
+    legacy: true,
+    legacy_before: before,
+    legacy_newer_pages: newerPages,
+    turns: batch.slice(-pageSize),
+    turn_notes: notes.filter(note => note.turn),
+    project_notes: notes.filter(note => !note.turn),
+    earlier: batch.length > pageSize,
+    later: before !== null,
+  };
+}
+
+function applySessionFilter(thread, mode) {
+  if (!currentPage) return;
+  journeyFilter = thread ? { thread, mode } : null;
+  const scope = mode === "only" ? thread : undefined;
+  if (scope === pageQuery.thread) {
+    renderView(currentPage, currentPage.data);
+    return;
+  }
+  const query = { ...pageQuery };
+  for (const key of ["thread", "before", "after", "edge"]) delete query[key];
+  if (scope) query.thread = scope;
+  pageQuery = query;
+  legacyNewerPages = [];
+  browserJump = null;
+  refresh();
+}
+
+function makeSessionControls(project) {
+  const sessions = new Set();
+  const details = node("details", undefined, "session-filter");
+  const summary = node("summary", "Session filter");
+  const panel = node("div", undefined, "session-controls");
+  const label = node("label", "Session");
+  const select = node("select");
+  select.append(node("option", "Choose a session"));
+  select.options[0].value = "";
+  label.append(select);
+  const highlight = action("Highlight", () => applySessionFilter(select.value, "highlight"));
+  const only = action("Show only", () => applySessionFilter(select.value, "only"));
+  const clear = action("Clear filter", () => applySessionFilter("", null));
+  const status = node("span", undefined, "meta");
+  status.setAttribute("role", "status");
+  panel.append(label, highlight, only, clear, status);
+  details.append(summary, panel);
+
+  function updateButtons() {
+    highlight.disabled = only.disabled = !select.value;
+    clear.disabled = !journeyFilter;
+    highlight.setAttribute("aria-pressed", String(journeyFilter?.mode === "highlight" && journeyFilter.thread === select.value));
+    only.setAttribute("aria-pressed", String(journeyFilter?.mode === "only" && journeyFilter.thread === select.value));
+  }
+  function addSessions(threads) {
+    const size = sessions.size;
+    for (const thread of threads) sessions.add(thread);
+    if (sessions.size === size) return;
+    const selected = select.value || journeyFilter?.thread;
+    const suffixes = new Map();
+    for (const thread of sessions) {
+      const suffix = thread.slice(-6);
+      suffixes.set(suffix, (suffixes.get(suffix) ?? 0) + 1);
+    }
+    select.length = 1;
+    for (const thread of [...sessions].sort()) {
+      const suffix = thread.slice(-6);
+      const option = node("option", suffixes.get(suffix) > 1 ? thread : suffix);
+      option.value = thread;
+      select.append(option);
+    }
+    select.value = selected ?? "";
+  }
+  select.addEventListener("change", updateButtons);
+  details.addEventListener("toggle", async () => {
+    if (!details.open) return;
+    if (!select.value && selectedJourneySession && !journeyFilter) select.value = selectedJourneySession;
+    updateButtons();
+    try {
+      addSessions(await api("sessions", { project }));
+      updateButtons();
+    } catch {
+      if (!sessions.size) status.textContent = "Session list unavailable";
+    }
+  });
+  return {
+    project, details,
+    update(data) {
+      addSessions(data.turns.map(row => row.thread));
+      summary.textContent = journeyFilter
+        ? `Session filter · ${journeyFilter.thread.slice(-6)} · ${journeyFilter.mode === "only" ? "Show only" : "Highlight"}`
+        : "Session filter";
+      status.textContent = journeyFilter?.mode === "highlight" &&
+        !data.turns.some(row => row.thread === journeyFilter.thread)
+        ? "This session has no turns on the current page." : "";
+      updateButtons();
+    },
+  };
+}
+
+function renderView(target, data) {
+  const { storage, project } = target;
+  const sig = JSON.stringify([target.key, [...visible], journeyFilter, noteEpoch, data.revision ?? data]);
+  if (last === sig) return;
+  last = sig;
+  const sameProjectPage = currentPage?.project === project &&
+    ["project_before", "project_after", "project_edge"].every(key => currentPage.query[key] === target.query[key]);
+  const oldScroll = new Map([...$("content").querySelectorAll("[data-pane]")]
+    .filter(pane => currentPage?.key === target.key || (sameProjectPage && pane.dataset.pane === "Project notes"))
+    .map(pane => [pane.dataset.pane, pane.scrollTop]));
+  if (storage || currentPage?.project !== project) selectedJourneySession = null;
+  currentPage = storage || !project ? null : { ...target, data };
+  const selected = document.activeElement?.dataset?.identity;
+  const selectedAxis = document.activeElement?.dataset?.axis;
+  $("view").hidden = false;
+  $("crumb").replaceChildren();
+  $("axes").replaceChildren();
+  $("title").textContent = project || (storage ? "Storage" : "Projects");
+  const showSessionControls = visible.has("Journey") || (journeyFilter && visible.has("Turn notes"));
+  $("sessionFilters").hidden = storage || !project || !showSessionControls;
+  if (!$("sessionFilters").hidden) {
+    if (sessionControls?.project !== project) {
+      sessionControls = makeSessionControls(project);
+      $("sessionFilters").replaceChildren(sessionControls.details);
+    }
+    sessionControls.update(data);
+  }
+  if (project || storage) {
+    const link = node("a", "All projects");
+    link.href = "#";
+    $("crumb").append(link);
+  }
+  if (!storage || project) $("crumb").append(storageLink());
+  if (storage) {
+    $("axes").append(action("Refresh", refresh));
+    $("content").replaceChildren(storageView(data, project));
+    return;
+  }
+  if (!project) {
+    $("content").replaceChildren(overview(data));
+    return;
+  }
+  for (const axis of axes) {
+    const label = node("label"), cb = node("input");
+    cb.type = "checkbox";
+    cb.checked = visible.has(axis);
+    cb.onchange = () => {
+      cb.checked ? visible.add(axis) : visible.delete(axis);
+      renderView(target, data);
+      [...$("axes").querySelectorAll("input")][axes.indexOf(axis)]?.focus();
+    };
+    label.append(cb, axis);
+    $("axes").append(label);
+  }
+  const nav = node("div", undefined, "pagination");
+  if (data.earlier) nav.append(
+    action("Oldest turns", () => paginate(0, "first")),
+    action("Earlier turns", () => paginate(0, "earlier")),
+  );
+  if (data.later) nav.append(action("Newer turns", () => paginate(0, "later")));
+  if (["before", "after", "edge"].some(key => target.query[key])) {
+    nav.append(action("Latest turns", () => paginate(0, "last")));
+  }
+  if (visible.has(axes[2])) {
+    if (data.project_earlier) nav.append(
+      action("Oldest project notes", () => paginate(2, "first")),
+      action("Earlier project notes", () => paginate(2, "earlier")),
+    );
+    if (data.project_later) nav.append(
+      action("Newer project notes", () => paginate(2, "later")),
+      action("Latest project notes", () => paginate(2, "last")),
+    );
+  }
+  if (noteCut?.project === project) nav.append(action("Cancel cut", () => {
+    noteCut = null;
+    noteEpoch++;
+    renderView(target, data);
+  }));
+  $("content").replaceChildren(nav, board(project, data.turns, [...data.turn_notes, ...data.project_notes]));
+  for (const pane of $("content").querySelectorAll("[data-pane]")) {
+    if (oldScroll.has(pane.dataset.pane)) pane.scrollTop = oldScroll.get(pane.dataset.pane);
+  }
+  if (browserJump?.key === target.key) {
+    const items = axisItems(browserJump.axis);
+    items[browserJump.first ? 0 : items.length - 1]?.focus();
+    browserJump = null;
+  } else if (selected != null && selectedAxis != null) {
+    axisItems(Number(selectedAxis)).find(item => item.dataset.identity === selected)?.focus({ preventScroll: true });
+  }
+}
+
+async function refresh() {
+  const target = route();
+  const cached = cachedRead(target.key);
+  if (cached && $("login").hidden && !$("detail").open) {
+    renderView(target, cached.data);
+    if (Date.now() - cached.saved > 10000) $("connection").textContent = "Cached data · refreshing";
+  }
+  if (activeRequest?.key === target.key) return activeRequest.promise;
+  activeRequest?.controller.abort();
+  const request = { key: target.key, controller: new AbortController(), id: ++version };
+  activeRequest = request;
+  request.promise = (async () => {
+    try {
+      const data = await readRoute(target, cached?.data, request.controller.signal);
+      if (request.id !== version) return;
+      if (cached?.data === data) cached.saved = Date.now();
+      else rememberRead(target.key, data);
+      $("login").hidden = true;
+      $("connection").textContent = "Connected";
+      if (!$("detail").open) renderView(target, data);
+    } catch (error) {
+      if (error.name === "AbortError" || request.id !== version) return;
+      $("connection").textContent =
+        cached && error.status !== 401 ? "Cached data · " + error.message : error.message;
+    } finally {
+      if (activeRequest === request) activeRequest = null;
+    }
+  })();
+  return request.promise;
+}
+
+function paginate(axis, direction) {
+  if (!currentPage) return;
+  const projectNotes = axis === 2;
+  const { data } = currentPage;
+  const entries = projectNotes ? data.project_notes : data.turns;
+  const prefix = projectNotes ? "project_" : "";
+  if ((direction === "earlier" || direction === "later") && !data[prefix + direction])
+    return;
+  const query = { ...pageQuery };
+  for (const name of ["before", "after", "edge"]) delete query[prefix + name];
+  if (!projectNotes) legacyNewerPages = [];
+  if (direction === "earlier" || direction === "later") {
+    const earlier = direction === "earlier";
+    const row = entries[earlier ? 0 : entries.length - 1];
+    if (!row) return;
+    const cursor = JSON.stringify(projectNotes ? [row.created, row.id] : [row.started, row.turn, row.thread]);
+    if (data.legacy && !projectNotes) {
+      legacyNewerPages = (data.legacy_newer_pages ?? []).slice();
+      if (earlier) {
+        legacyNewerPages.push(data.legacy_before ?? null);
+        query.before = cursor;
+      } else {
+        const before = legacyNewerPages.pop();
+        if (before) query.before = before;
+      }
+    } else query[prefix + (earlier ? "before" : "after")] = cursor;
+  } else if (axis === 1) query.edge = direction + "-note";
+  else if (direction === "first") query[prefix + "edge"] = "first";
+  pageQuery = query;
+  browserJump = { key: route().key, axis, first: ["first", "later"].includes(direction) };
+  if (browserJump.key === currentPage.key) {
+    const items = axisItems(axis);
+    items[browserJump.first ? 0 : items.length - 1]?.focus();
+    browserJump = null;
+  } else refresh();
+}
+
+function axisItems(axis) {
+  return [...$("content").querySelectorAll(`[data-axis="${axis}"]`)];
+}
+
+function moveBetweenAxes(element, direction) {
+  const candidates = axes.flatMap((axis, index) =>
+    visible.has(axis) && (index - activeAxis) * direction > 0 ? [index] : []);
+  const nextAxis = direction < 0 ? candidates.at(-1) : candidates[0];
+  if (nextAxis === undefined) return;
+
+  const items = axisItems(nextAxis);
+  const card = element.closest(".board-card.paired");
+  const pane = [...$("content").querySelectorAll("[data-pane]")].find(candidate =>
+    candidate.dataset.pane.split("+").includes(axes[nextAxis]));
+  activeAxis = nextAxis;
+  if (card && nextAxis < 2 && pane) {
+    const cards = [...pane.children];
+    const row = cards.indexOf(card);
+    const nearest = items.reduce((best, item) => {
+      const distance = Math.abs(cards.indexOf(item.closest(".board-card")) - row);
+      return !best || distance < best.distance ? { item, distance } : best;
+    }, null);
+    if (nearest) {
+      nearest.item.focus();
+      return;
+    }
+  }
+  if (pane) {
+    const top = pane.getBoundingClientRect().top;
+    (items.find(item => item.getBoundingClientRect().bottom > top) ?? pane).focus();
+  }
+}
+
+function browseKeys(event) {
+  if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing)
+    return;
+  if (event.target.matches("input, select, textarea, [contenteditable]")) return;
+  if ($("detail").open) {
+    if (activeNoteEditor) return;
+    const frame = $("modalBody");
+    if (["j", "k", "d", "u", "g", "G"].includes(event.key)) {
+      event.preventDefault();
+      const scroll = $("detail");
+      if (event.key === "g") {
+        if (gPending) scroll.scrollTop = 0;
+        gPending = !gPending;
+      } else {
+        gPending = false;
+        if (event.key === "G") scroll.scrollTop = frame.scrollHeight;
+        else scroll.scrollTop += ({ j: 28, k: -28, d: scroll.clientHeight / 2, u: -scroll.clientHeight / 2 })[event.key];
+      }
+    }
+    return;
+  }
+  if (!currentPage || !event.target.closest("main")) return;
+  if (event.target.dataset.axis != null) activeAxis = Number(event.target.dataset.axis);
+  else if (event.target.dataset.pane && !event.target.dataset.pane.split("+").includes(axes[activeAxis]))
+    activeAxis = axes.indexOf(event.target.dataset.pane.split("+")[0]);
+  if (/^[123]$/.test(event.key)) {
+    event.preventDefault();
+    activeAxis = Number(event.key) - 1;
+    visible.clear();
+    visible.add(axes[activeAxis]);
+    const { data, ...target } = currentPage;
+    renderView(target, data);
+    axisItems(activeAxis)[0]?.focus();
+    return;
+  }
+  if (!["h", "l", "j", "k", "d", "u", "g", "G"].includes(event.key) && !Object.hasOwn(pageKeys, event.key))
+    return;
+  event.preventDefault();
+  if (event.key === "h" || event.key === "l") {
+    gPending = false;
+    moveBetweenAxes(event.target, event.key === "h" ? -1 : 1);
+    return;
+  }
+  if (event.key === "g") {
+    if (gPending) axisItems(activeAxis)[0]?.focus();
+    gPending = !gPending;
+    return;
+  }
+  gPending = false;
+  if (event.key === "G") {
+    axisItems(activeAxis).at(-1)?.focus();
+    return;
+  }
+  if (Object.hasOwn(pageKeys, event.key)) {
+    paginate(activeAxis, pageKeys[event.key]);
+    return;
+  }
+  const items = axisItems(activeAxis);
+  const index = items.indexOf(document.activeElement);
+  const pane = items[0]?.closest("[data-pane]");
+  const half = Math.max(1, Math.floor((pane?.clientHeight ?? window.innerHeight) / 130));
+  const step = ({j: 1, k: -1, d: half, u: -half})[event.key];
+  items[Math.max(0, Math.min(items.length - 1, index + step))]?.focus();
+}
+
+$("home").onclick = () => { location.hash = ""; };
+$("close").onclick = closeJournalDialog;
+$("detail").addEventListener("cancel", () => {
+  detailRequest?.abort();
+  finishNoteEditing();
+});
+$("detail").addEventListener("close", () => {
+  if ($("detail").open) return;
+  detailRequest?.abort();
+  detailRequest = null;
+  finishNoteEditing();
+  modalTrigger?.focus({ preventScroll: true });
+  modalTrigger = null;
+  $("modalBody").replaceChildren();
+  refresh();
+});
+$("auth").onsubmit = async event => {
+  event.preventDefault();
   try {
     await api("login", {}, { token: $("token").value });
     $("token").value = "";
     last = "";
     refresh();
-  } catch (err) {
-    $("connection").textContent = err.message;
+  } catch (error) {
+    $("connection").textContent = error.message;
   }
 };
-window.addEventListener("hashchange", () => { before = ""; refresh(); });
+window.addEventListener("hashchange", () => {
+  pageQuery = {};
+  legacyNewerPages = [];
+  journeyFilter = null;
+  sessionControls = null;
+  browserJump = null;
+  last = "";
+  if ($("detail").open) closeJournalDialog();
+  refresh();
+});
+window.addEventListener("online", () => { pumpDrafts(); refresh(); });
+window.addEventListener("pagehide", () => {
+  for (const draft of noteDrafts.values()) {
+    if (draft.checkpoint) checkpointDraft(draft);
+  }
+});
+document.addEventListener("keydown", browseKeys);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 refresh();
+setInterval(pumpDrafts, 250);
 setInterval(() => {
-  if (!document.hidden && !$("detail").open && $("login").hidden && !isStorageRoute())
+  if (!activeRequest && !document.hidden && !$("detail").open && $("login").hidden && !isStorageRoute())
     refresh();
 }, 3000);

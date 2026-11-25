@@ -6,6 +6,8 @@ Run the central server on a Linux VM with a persistent volume and an HTTPS rever
 
 Use a Linux VM with a running systemd instance, Git, curl, Python 3.11 or newer, and a working Nix installation. The installer needs sudo. For managed HTTPS, install Caddy, point a public hostname at the VM, and leave ports 80 and 443 available for the journal proxy.
 
+On a host that regenerates system accounts at boot, declare the `journal` service user and group with persistent IDs in the host configuration before installing.
+
 ```sh
 release_url=$(curl -fsSL --proto '=https' -o /dev/null -w '%{url_effective}' https://github.com/shk95/agent-journal/releases/latest)
 release_tag=${release_url##*/}
@@ -14,18 +16,50 @@ cd agent-journal
 sudo python3 scripts/server_deploy.py install --release "$release_tag" --domain journal.example.com
 ```
 
-Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer verifies the release manifest and tag, builds the released commit's `#server` package, starts the journal, and enables the release timer. Without `--release`, it selects the newest published stable server release. Use `--local` for the disposable VM test in [local development](SETUP.md#local-deployment-smoke-test).
+Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer verifies the release manifest and tag, builds the released commit's `#server` package, and starts the journal. Without `--release`, it selects the newest published stable server release. Pass `--auto-update` to install and enable the release timer at the same time. Use `--local` for the disposable VM test in [local development](SETUP.md#local-deployment-smoke-test).
 
 ```sh
 curl -f http://127.0.0.1:8765/healthz
 curl -f https://journal.example.com/healthz
 systemctl status agent-journal.service
-systemctl list-timers agent-journal-update.timer
+systemctl status agent-journal-recover.service
 ```
 
 The installer generates the access token in `/etc/agent-journal/server.env`. Share it through a private channel when connecting a work machine. Deployed packages and the updater live under `/opt/agent-journal`. The active database is reached through `/opt/agent-journal/current/data/journal.sqlite3` and stored on the persistent volume under `/var/lib/agent-journal`.
 
 An existing manually managed `agent-journal.service` requires a separate migration. Take and verify a backup before changing ownership of the service or moving its database.
+
+## Release monitoring and recovery
+
+Use the host updater to check and apply one eligible release manually or to install and enable scheduled updates. Disabling the timer preserves the service, active release, and boot recovery. An update already under way can finish.
+
+```sh
+sudo python3 /opt/agent-journal/server_deploy.py update
+sudo python3 /opt/agent-journal/server_deploy.py auto-update enable
+systemctl list-timers agent-journal-update.timer
+sudo python3 /opt/agent-journal/server_deploy.py auto-update disable
+```
+
+The timer checks for a newer stable release every 15 minutes. The updater verifies the manifest digest and the Git tag's commit. It selects the highest compatible release whose exact deployment identity is eligible. A blocked newer release leaves compatible intermediate releases eligible.
+
+After building a candidate, the updater holds normal client traffic, stops the predecessor, and snapshots its database. The candidate opens and migrates its copy, reports its identity, and passes an authenticated read through a local operator probe. The updater persists the successful commit before reopening traffic. The boot recovery unit reconciles any pending switch before the application starts, even with scheduled checks disabled.
+
+Confirmed migration, startup, or readiness failures are recorded against the exact release identity after rollback. Connection, download, and host resource errors can be retried after backoff. Use `status` to see the recorded phase, reason, and time. An explicit retry revalidates the release, quarantines a leftover candidate copy when eligible, and takes a new snapshot of the active database.
+
+```sh
+sudo python3 /opt/agent-journal/server_deploy.py status
+sudo python3 /opt/agent-journal/server_deploy.py retry v0.5.0-0123456789ab
+sudo python3 /opt/agent-journal/server_deploy.py recover
+sudo python3 /opt/agent-journal/server_deploy.py cleanup
+```
+
+Cleanup runs after commit and is independently retryable. It removes eligible predecessor database files and retains failed candidate databases for seven days. Active databases and those referenced by an unfinished switch are protected. With automatic updates disabled, run `cleanup` to expire failed diagnostic copies or retry failed cleanup. Keep independent backups on separate storage to recover data after the new deployment accepts writes.
+
+Refresh the host controls of an existing managed installation from a reviewed checkout containing the desired updater and unit files. The command preserves the existing timer setting. Recover any pending switch first.
+
+```sh
+sudo python3 scripts/server_deploy.py install-controls
+```
 
 ## Publish a release
 
@@ -44,26 +78,19 @@ The release workflow checks the public history, mixed client/server versions, Ni
 
 Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.4.0#client' -- tui` runs that release's client.
 
-The timer checks every 15 minutes for a stable `vX.Y.Z` release with a server manifest and a version newer than the installed package. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
+Declare the tested database source ranges under `[[tool.agent-journal.upgrade-from]]` in `pyproject.toml`. Each entry contains inclusive `minimum` and `maximum` stable tags. The release workflow publishes them as `upgrade_from` in the verified server manifest. Use `uv run --locked python -m tests.compatibility --database-migrations` to test same-major snapshots locally. Keep the ranges limited to tested migrations, including when releasing across a major version.
 
-For the switch, the updater fences client requests, stops the old process, and snapshots its database into the new deployment. Requests resume after the new process reports the expected deployment ID and a ready database. On failure the updater restores the previous executable and its original database. It records failed revisions so the timer will wait for a corrected release. An interrupted switch is reconciled when the updater runs again.
+Legacy releases with no source ranges are available for an explicit fresh install, including recovery into an independent deployment from a verified backup. Automated and one-shot in-place updates require a compatible range. Refresh the host controls when changing the updater itself. Application releases preserve the server token, proxy settings, and updater schedule.
 
-```sh
-sudo systemctl start agent-journal-update.service
-sudo journalctl -u agent-journal-update.service -n 100 --no-pager
-sudo python3 /opt/agent-journal/server_deploy.py recover
-```
+## Test cleanup policy
 
-The updater and systemd unit files are installed as host configuration. Replacing those control files requires a reviewed host change. Application releases update the server package and web UI while using the host token and proxy settings. Keep disk space for the candidate and the prior database snapshot. Use independent backups for recovery from storage loss.
+Local smoke, performance, and compatibility runs use private temporary workspaces. After their processes have stopped, the runners delete the workspace on success, failure, or cancellation. On failure they save the traceback and, when available, the last 64 KiB of the isolated collector log in `.local/test-failures/`. The report directory is private. The retention policy covers these reports. Fixture databases, connection settings, browser profiles, and interactive demo data stay outside the report directory.
 
-If a VM has an updater from the `server-v` tag era, refresh the installed script from a reviewed checkout before publishing the first shared release.
+Reports expire after 24 hours. The next local integration run removes expired reports, or an operator can run `just clean-test-reports` from the checkout. Collect any diagnostics needed for a longer investigation in private storage before expiry. Review reports for local paths and credentials before sharing. Confirm the disposition of interactive demo data separately, since an interrupted demo may contain notes written by its user.
 
-```sh
-sudo systemctl stop agent-journal-update.timer agent-journal-update.service
-sudo install -m 0600 scripts/server_deploy.py /opt/agent-journal/server_deploy.py
-sudo python3 /opt/agent-journal/server_deploy.py recover
-sudo systemctl start agent-journal-update.timer
-```
+On a workstation, stop tests with `Ctrl+C` or `SIGTERM` and let the runner finish cleanup. If the runner itself must be force-killed, the supervising job owns cleanup. Use a disposable VM or a supervisor that can stop the entire job scope, including descendants that started their own sessions. For a run already interrupted on a shared workstation, verify the run's private directory and its process IDs or socket before stopping residual processes.
+
+Run the deployment scenarios on [one disposable Linux VM](SETUP.md#local-deployment-smoke-test). Keep its services and disk through the rollback and boot-recovery checks. Retire the VM and its test disk after the last check or when abandoning the run. If a failure needs investigation, keep the VM isolated until the relevant diagnostics are copied, then retire it. Apply the 24-hour diagnostic retention to those copies.
 
 ## Manual installation
 

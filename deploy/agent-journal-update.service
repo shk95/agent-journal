@@ -1,7 +1,8 @@
 [Unit]
 Description=Check and apply Agent Journal server releases
 Wants=network-online.target
-After=network-online.target
+Requires=agent-journal-recover.service
+After=network-online.target agent-journal-recover.service
 
 [Service]
 Type=oneshot

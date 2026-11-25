@@ -76,18 +76,25 @@ agent-journal
 ```
 
 - Press `1`, `2`, or `3` to open Journey, Turn notes, or Project notes on its own. Inside that view, use the same keys to show or hide axes. At least one axis stays open.
-- Use `Tab` to move focus between visible axes and `j/k` to select an item. Press `Enter` to open a transcript or a note. `Esc` returns to the same combination of axes and scroll position. Press `Esc` again to return to the overview.
-- Use `m` for a turn note and `n` for a project note.
-- Press `e` on a selected or open note to edit it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
-- Click a turn to select it, a note to open it, or a bracketed control to run its action. Use the wheel over a column or inside an open item where the terminal and curses support it.
+- Use `h/l` to move to the visible axis on the left or right, or `Tab` and `Shift+Tab` to cycle through the axes. Use `j/k` to move one item or line and `d/u` to move half a screen. Use `gg/G` for the first or last item on the current page. `Older` (`[`) and `Newer` (`]`) move one page. `Oldest` (`<`) and `Latest` (`>`) jump to the ends of the history for the focused axis.
+- Scroll over an axis with the mouse wheel or focus it before using the keyboard. Journey and Turn notes share a scrolling pane when both are visible. Each card contains the turn and its attached notes. Project notes scroll independently.
+- Press `Enter` to open a transcript or note. Parent layers remain visible at the top of the screen. `Esc` closes the top layer and restores the parent selection and scroll position. On short terminals, the path above the content identifies the active layer.
+- Use `m` for a turn note, `n` for a project note, and `e` to edit an existing note in place. In the editor, `i` enters Insert mode, `Esc` returns to Normal mode, `Ctrl+P` toggles the Markdown preview, and `:w` queues an immediate save.
+- In a note detail, `D` prompts for deletion. In a turn note, `x` selects it for moving. Navigate to another turn and press `p` to move it, or `X` to cancel the cut.
+- Use `Status` in a note detail in either client to choose Highlighted, Normal, or Low priority. In the TUI, press `s` to open the menu and `1`, `2`, or `3` to choose a status. Existing and new notes default to Normal. The status changes the title's appearance and preserves the note's position. Status changes require a server connection.
+- Click a turn to select it, a note to open it, or a bracketed control to run its action. Shortcuts appear beside the controls where space permits. For example, `[Edit] e` opens the editor when you press `e` or click the control. Use the wheel over a column or inside an open item where the terminal and curses support it.
 
-The project name, active axes, and item title stay visible on separate lines as you open deeper views.
+Notes use Markdown. Write a heading such as `# Import results` to name the note. The first top-level heading supplies the title, and a leading title heading appears once in the detail view. Notes without a heading appear as `Untitled note`. Note details and previews show single line breaks and spacing between paragraphs.
 
-The Journey graph connects turns from each session through the request and summary lines. The TUI uses your terminal's default foreground and background and its ANSI palette for session lanes. Set `NO_COLOR=1` to draw the lanes in the default foreground color.
+The Journey graph connects each session's turns in a continuous column beside the turn cards. Each turn has a short session label in its graph color. Focusing a turn shades every card from the same session, including its attached notes. The TUI underlines the labels in terminals with fewer than 256 colors or when `NO_COLOR=1` is set.
 
 Mouse input is enabled by default. In tmux, enable forwarding with `set -g mouse on`. Use `agent-journal tui --no-mouse` to leave mouse selection to the terminal or tmux.
 
-Run `agent-journal web` to open the overview in your browser, or `agent-journal web --project OWNER/REPO` to open a project directly. The command prints the URL for use in another browser or on a remote terminal. Sign in to the web journal with the server access token.
+Run `agent-journal web` to open the overview in your browser, or `agent-journal web --project OWNER/REPO` to open a project directly. The command prints the URL for use in another browser or on a remote terminal. Sign in to the web journal with the server access token. The project board supports the same `h/l`, `j/k`, `gg/G`, `[/]`, and `</>` navigation as the TUI.
+
+Open `Session filter` above Journey and pick a session. `Highlight` keeps its turns highlighted as you move around the board. `Show only` limits Journey and its attached Turn notes to that session across all pages. `Clear filter` returns to all sessions.
+
+Both clients retain a recent view cache and save note drafts locally. After about one second without input, the editor sends the latest draft to the server. `Saved` indicates acknowledgement from the server. `Saved locally` means the draft is available on the device while synchronization is pending. On a version conflict, the terminal editor uses `Ctrl+R` to review the server version and the browser provides a review button. Use a UTF-8 locale in the terminal for multilingual input and display.
 
 Use `agent-journal projects` to see the registration state. Use `agent-journal disable` to stop collecting turns for the current project. You can still read the recorded history.
 
@@ -129,14 +136,18 @@ See [cloud operations](OPERATIONS.md) for deployment and backup restoration.
 
 ### Interactive fixture demo
 
-Install `just` and `uv`, then run either command from the checkout.
+Install `just` and `uv`. Run `just` from the checkout to list the available recipes, then choose a demo.
 
 ```sh
-just demo
-just demo web
+just demo-tui
+just demo-web
 ```
 
-Each command starts the server from the current checkout on a free loopback port and loads synthetic turns and notes into a temporary database. The default opens the terminal client on the fixture project. The web demo opens the same fixture in your browser. Use the temporary token printed in the terminal to sign in. Press `q` in the TUI or `Ctrl+C` in the terminal to stop the server and discard demo data. Each demo uses its own connection settings and browser sign-in cookie.
+Each demo starts the server from the current checkout on a free loopback port and loads synthetic turns and notes into a temporary database. The TUI and web demos open the same fixture project. To sign in to the web demo, use the temporary token printed in the terminal. Press `q` in the TUI or `Ctrl+C` in the terminal to stop the server and discard demo data. Each demo uses its own connection settings and browser sign-in cookie.
+
+`just demo-tui` restores the terminal settings when the demo process exits. If the entire process group is force-killed and the terminal cannot display typed commands correctly, run `stty sane; reset` to recover the pane.
+
+The fixture includes turns with zero, one, and several attached notes, and enough turns and project notes to try both pagination directions. In the TUI, press `1` or `2` to inspect an axis on its own, then toggle the other axis to see the shared turn cards. Use `Tab` to change the active axis and `d/u` to scroll within a page.
 
 ### Persistent development server
 
@@ -171,6 +182,8 @@ Run the software tests locally before publishing. GitHub Actions checks the publ
 uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 node --check src/agent_journal/static/app.js
+node --check src/agent_journal/static/notes.js
+node --check src/agent_journal/static/sw.js
 uv build
 ```
 
@@ -181,9 +194,12 @@ Run the entire interactive path on one development machine with Git, tmux, and C
 ```sh
 uv run --locked --with playwright==1.65.2 python -m playwright install chromium
 uv run --locked --with playwright==1.65.2 python -m tests.smoke_local
+uv run --locked --with playwright==1.65.2 python -m tests.client_performance
 ```
 
-If Chrome is installed, omit the browser installation command and pass `--browser-channel chrome` to the smoke test. Use `--codex PATH` to select a compatible Codex binary.
+If Chrome is installed, omit the browser installation command and pass `--browser-channel chrome` to either browser test. Use `--codex PATH` with the smoke test to select a compatible Codex binary. The performance fixture measures key response during an injected delay, note preview payload size, browser rendering after a slow response, and formatting the first viewport of a long transcript.
+
+The smoke, performance, and compatibility runners clean up their test processes on completion, failure, and termination signals. The TUI tests first attempt a normal exit. The smoke test also stops detached collectors from its private state directory. Stop a local run with `Ctrl+C` or `SIGTERM` to let this cleanup run. See the [test cleanup policy](OPERATIONS.md#test-cleanup-policy) for failure reports, retention, and forced termination.
 
 To exercise the standalone client through the same flow, build the bundle and pass its executable path. On Linux, use the release build container to target the same glibc baseline as the published assets.
 
@@ -200,11 +216,26 @@ Run the installer and rollback test on a **fresh, disposable Linux VM with syste
 ```sh
 nix build .#server
 sudo python3 scripts/server_deploy.py install --local
-systemctl is-active agent-journal-update.timer
-sudo systemctl stop agent-journal-update.timer agent-journal-update.service
+systemctl is-active agent-journal.service agent-journal-recover.service
+sudo python3 /opt/agent-journal/server_deploy.py auto-update disable
 sudo python3 -m tests.test_server_deploy smoke
 ```
 
 This exercises Linux service startup, SQLite snapshot transfer to the candidate, request fencing, and automatic rollback. The smoke test starts from an empty journal because it installs a synthetic release and deliberately triggers a health failure.
+
+Continue on the same disposable VM to test failed migration, failed startup, and retrying an interrupted database cleanup. Stage each boot case, reboot only the test VM, and run its matching verification command after the VM returns.
+
+```sh
+sudo python3 -m tests.test_server_deploy smoke-failures
+sudo python3 -m tests.test_server_deploy stage-boot-uncommitted
+# Reboot the disposable VM here.
+sudo python3 -m tests.test_server_deploy verify-boot-uncommitted
+sudo python3 -m tests.test_server_deploy stage-boot-committed
+# Reboot the disposable VM here.
+sudo python3 -m tests.test_server_deploy verify-boot-committed
+sudo python3 -m tests.test_server_deploy smoke-readiness
+```
+
+After the final check, retire the disposable VM and its test disk. Follow the [test cleanup policy](OPERATIONS.md#test-cleanup-policy) if you need to collect diagnostics first.
 
 See [the repository instructions](../AGENTS.md) for public file, commit, and privacy rules.

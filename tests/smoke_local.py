@@ -3,16 +3,16 @@
 import argparse
 import ast
 import contextlib
-import curses
 import json
 import os
 import re
 import secrets
+import select
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
+import termios
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +23,10 @@ from agent_journal.codex_integration import collector_lock
 from agent_journal.common import Api
 from agent_journal.observer import Codex
 from scripts.dev import FIXTURE, seed
+from tests.processes import (
+    child, cleanup_on_termination, observer_groups, startup_line, stop_group, stop_tmux,
+)
+from tests.workspace import test_workspace
 
 PROJECT = "example/journal-smoke"
 REGISTER_TASK = "Register this repository with Agent Journal."
@@ -36,6 +40,42 @@ EDIT = "Keep the regression fixture with the import."
 PROJECT_NOTE = "Review other import formats later."
 MOUSE_NOTE = "Keep the input in the example."
 MOUSE_EDIT = "Save the input with its example."
+
+
+def legacy_browser_pages(browser, api, cookies):
+    project = "example/legacy-browser"
+    api.request("register", {"project": project})
+    since = next(row["since"] for row in api.request("projects") if row["project"] == project)
+    for index in range(140):
+        api.request("turns", {
+            "project": project, "thread": "legacy", "turn": f"sample-{index:03}",
+            "started": int(since) + 1 + index, "prompt": f"Legacy sample {index:03}",
+            "summary": "Recorded sample", "items": [], "status": "completed", "revision": 1,
+        })
+    api.request("notes", {"project": project, "id": "legacy-note", "body": "# Legacy note\n\nSample body"})
+    with browser.new_context(service_workers="block") as context:
+        context.add_cookies(cookies)
+        page = context.new_page()
+        page.route("**/api/board?*", lambda route: route.fulfill(status=404, json={}))
+        page.route("**/api/note?*", lambda route: route.fulfill(status=404, json={}))
+        page.goto(api.base + "/#" + project)
+        rows = page.locator(".rowbtn")
+        for command, first in (
+            (None, 80), ("Earlier turns", 20), ("Earlier turns", 0),
+            ("Newer turns", 20), ("Latest turns", 80), ("Oldest turns", 0),
+            ("Newer turns", 20), ("Newer turns", 80),
+        ):
+            if command:
+                page.get_by_role("button", name=command, exact=True).click()
+            rows.first.get_by_text(f"Legacy sample {first:03}", exact=True).wait_for()
+        page.get_by_role("button", name="Legacy note", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_text("Sample body", exact=True).wait_for()
+        dialog.get_by_role("button", name="Edit", exact=True).click()
+        dialog.get_by_label("Note text").fill("# Edited legacy note\n\nSample body")
+        dialog.get_by_role("button", name="Save", exact=True).click()
+        wait_for("the legacy note edit to reach the server", lambda:
+                 api.request("notes", project=project)[0]["body"].startswith("# Edited legacy note"))
 
 
 class FixtureModel(BaseHTTPRequestHandler):
@@ -112,7 +152,7 @@ class FixtureModel(BaseHTTPRequestHandler):
                 arguments = {
                     "project": PROJECT,
                     "request_id": call_id,
-                    "body": NOTE,
+                    "body": "# " + NOTE,
                     **target,
                 }
             answer = "Saved the requested turn note."
@@ -151,21 +191,6 @@ def wait_for(label, check, timeout=30):
     raise RuntimeError(f"Timed out waiting for {label}")
 
 
-@contextlib.contextmanager
-def child(command, **options):
-    proc = subprocess.Popen(command, **options)
-    try:
-        yield proc
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-
-
 def provider_config(url):
     return [
         "-c",
@@ -196,31 +221,29 @@ def check_clients(path, repo, cli, env, api, channel):
     tmux = ["tmux", "-S", str(path / "tm")]
     nested = repo / "nested"
     nested.mkdir()
-    editor = path / "editor"
-    editor.write_text(
-        "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(MOUSE_EDIT) + ' > "$1"\n'
-    )
-    editor.chmod(0o700)
-    subprocess.run(
-        tmux
-        + [
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-s",
-            "journal",
-            "-x",
-            "125",
-            "-y",
-            "30",
-            "-c",
-            str(nested),
-            shlex.quote(str(cli)),
-        ],
-        check=True,
-        env=env | {"TERM": "xterm-256color", "VISUAL": str(editor)},
-    )
+    profile = "xterm-ghostty" if os.environ.get("TERM") == "xterm-ghostty" else "xterm-256color"
+    def launch():
+        subprocess.run(
+            tmux
+            + [
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "journal",
+                "-x",
+                "125",
+                "-y",
+                "30",
+                "-c",
+                str(nested),
+                f"TERM={profile} {shlex.quote(str(cli))}",
+            ],
+            check=True,
+            timeout=10,
+            env=env | {"TERM": "xterm-256color"},
+        )
 
     def screen():
         return subprocess.check_output(
@@ -251,147 +274,167 @@ def check_clients(path, repo, cli, env, api, channel):
             check=True,
         )
 
-    def click_label(label):
+    def click_label(label, offset=0):
         y, line = next(
-            (i, row) for i, row in enumerate(screen().splitlines()) if label in row
+            (i, row) for i, row in reversed(list(enumerate(screen().splitlines())))
+            if label in row
         )
-        mouse(0, line.index(label), y, click=True)
+        mouse(0, line.index(label) + offset, y, click=True)
 
     def selected(prompt):
         return any(
-            row.startswith(">") and prompt in row for row in screen().splitlines()
+            ">" in row[:8] and prompt in row for row in screen().splitlines()
         )
 
+    def axis(label):
+        return "[Back] Esc Axes · " + label in screen()
+
+    def action_bar(*labels):
+        lines = screen().splitlines()
+        return any(
+            all(label in row for label in labels) and re.fullmatch(r"│─+│", lines[i + 1])
+            for i, row in enumerate(lines[:-1])
+        )
+
+    def send(*keys):
+        subprocess.run(tmux + ["send-keys", "-t", "journal", *keys], check=True)
+
+    def paste(value):
+        subprocess.run(tmux + ["set-buffer", "--", value], check=True)
+        subprocess.run(tmux + ["paste-buffer", "-p", "-t", "journal"], check=True)
+
     try:
+        launch()
         wait_for("the TUI journey for the current checkout", lambda: TASK in screen())
+        assert "[Transcript] t" in screen() and "[+ Turn note] m" in screen()
+        assert "[Older]" not in screen() and "[Newer]" not in screen()
+        send("[")
+        wait_for("feedback at the oldest page", lambda: "No older turns" in screen())
         if screen().splitlines()[0] != PROJECT:
             raise RuntimeError("The default TUI did not select the checkout's project")
-        target = tmux + ["send-keys", "-t", "journal"]
         turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
         lines = screen().splitlines()
-        if [line[1] for line in lines[turn_row : turn_row + 3]] != ["●", "│", "●"]:
-            raise RuntimeError("The terminal session line stops at the summary row")
+        label = "● " + api.request("journey", project=PROJECT)[0]["thread"][-6:]
+        assert label in lines[turn_row]
+        assert any(NOTE_TASK in row and label in row for row in lines)
+        if [line[2] for line in lines[turn_row : turn_row + 4]] != ["●", "│", "│", "●"]:
+            raise RuntimeError("The terminal session line stops at the card boundary")
+        if not re.match(r"^┌─+┐ ┌", lines[turn_row - 1]):
+            raise RuntimeError("The terminal session graph needs its own frame")
+        graph, separator, cards = lines[turn_row + 2].partition(" ├")
+        if not separator or set(graph) - {"│", " "}:
+            raise RuntimeError("Card borders must stop outside the terminal session graph")
+        boundary = re.match(r"^─+┼─+┤", cards)
+        header = lines[turn_row - 1]
+        if not boundary or len(graph + separator + boundary[0]) - 1 != header.index("┐", len(graph)):
+            raise RuntimeError("The card separator must extend across both turn columns")
         click_label("[1 Journey]")
-        wait_for(
-            "the Journey axis view",
-            lambda: (
-                screen().splitlines()[1] == "[Back] Axes · 1 Journey"
-                and screen().splitlines()[3] == "Journey"
-            ),
-        )
+        wait_for("the Journey axis view", lambda: axis("1 Journey"))
         click_label("[2 Turn notes]")
+        wait_for("the combined axis view", lambda: axis("1 Journey + 2 Turn notes"))
         wait_for(
-            "the combined axis view",
-            lambda: (
-                "Axes · 1 Journey + 2 Turn notes" in screen().splitlines()[1]
-                and "Turn notes" in screen().splitlines()[3]
-            ),
+            "the turn and its note inside one pair of columns",
+            lambda: any(TASK in row and NOTE in row and "│" in row for row in screen().splitlines()),
         )
-        subprocess.run(target + ["2"], check=True)
-        wait_for("the single axis again", lambda: screen().splitlines()[3] == "Journey")
-        subprocess.run(target + ["2"], check=True)
-        wait_for(
-            "the restored combined axis view",
-            lambda: "Turn notes" in screen().splitlines()[3],
-        )
-        turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
-        mouse(0, 1, turn_row, click=True)
-        wait_for("the selected turn", lambda: selected(TASK))
+        send("2")
+        wait_for("the single axis again", lambda: "Axes · 1 Journey +" not in screen())
+        send("2")
+        wait_for("the restored combined axis view", lambda: axis("1 Journey + 2 Turn notes"))
+        send("g", "g")
+        wait_for("the first turn selected", lambda: selected(TASK))
+        send("l")
+        wait_for("the note on the same turn selected with l", lambda:
+                 re.search(r"› (?:\[\d+/\d+\] )?" + re.escape(NOTE), screen()))
+        send("l", "Enter")
+        wait_for("the rightmost axis to stay active", lambda: "Turn note · " + TASK in screen())
+        send("Escape", "h")
+        wait_for("the original turn focused with h", lambda:
+                 "[Close]" not in screen() and selected(TASK) and "› " + NOTE not in screen())
         click_label("[Transcript]")
-        wait_for(
-            "the clicked turn's transcript with its parent context",
-            lambda: (
-                ANSWER in screen()
-                and "Axes · 1 Journey + 2 Turn notes" in screen().splitlines()[1]
-                and f"[Close] Transcript · {TASK}" in screen().splitlines()[2]
-            ),
-        )
-        subprocess.run(target + ["3"], check=True)
+        wait_for("the clicked turn's transcript and its parent", lambda:
+                 ANSWER in screen() and action_bar("[Close] Esc") and "Axes ·" in screen())
+        layers = screen().rstrip("\n").splitlines()
+        for row in (3, 6):
+            if not re.fullmatch("┌─+┐", layers[row]):
+                raise RuntimeError("Modal layers must share the entire pane width")
+        if not (
+            axis("1 Journey + 2 Turn notes") and "Axes ·" in layers[5]
+            and all(line.startswith("│") and line.endswith("│") for line in layers[7:-1])
+            and re.fullmatch("└─+┘", layers[-1])
+        ):
+            raise RuntimeError("Only the top edges of parent layers should remain visible")
+        send("d", "u", "G", "g", "g")
         click_label("[Close]")
-        wait_for(
-            "the restored axes and selected turn",
-            lambda: (
-                "[Back] Axes · 1 Journey + 2 Turn notes" == screen().splitlines()[1]
-                and selected(TASK)
-            ),
-        )
-        if hasattr(curses, "BUTTON5_PRESSED"):
-            mouse(65, 1, turn_row)
-            wait_for("the turn after scrolling down", lambda: selected(NOTE_TASK))
-            click_label("[Transcript]")
-            wait_for(
-                "the open transcript after scrolling down",
-                lambda: NOTE_TASK in screen() and "[Close]" in screen(),
-            )
-            mouse(65, 1, 3)
-            wait_for(
-                "the transcript scrolled down",
-                lambda: screen().splitlines()[3].strip() == "{",
-            )
-            mouse(64, 1, 3)
-            wait_for(
-                "the transcript scrolled back",
-                lambda: screen().splitlines()[3].strip() == "[userMessage]",
-            )
-            click_label("[Close]")
-            wait_for(
-                "the journey after scrolling down", lambda: "[Transcript]" in screen()
-            )
-            mouse(64, 1, turn_row)
-            wait_for("the turn after scrolling up", lambda: selected(TASK))
+        wait_for("the restored axes", lambda:
+                 axis("1 Journey + 2 Turn notes") and selected(TASK) and "[Close]" not in screen())
         click_label("[+ Turn note]")
-        wait_for(
-            "the clicked turn note input", lambda: "Empty line cancels" in screen()
-        )
-        subprocess.run(target + ["-l", MOUSE_NOTE], check=True)
-        subprocess.run(target + ["Enter"], check=True)
+        wait_for("the in-place turn note editor", lambda:
+                 "Insert ·" in screen() and action_bar("[Close] Esc", "[Save] :w", "[Preview] ^P"))
+        title = "한글 노트"
+        paragraph = "Next paragraph."
+        markdown = f"# {title}\n\n{MOUSE_NOTE}\n    Indented line\\\nHard break.\n\n{paragraph}"
+        expected_lines = [MOUSE_NOTE, "Indented line", "Hard break.", "", paragraph]
+
+        def shows_note_lines(*, preview=False):
+            rows = screen().splitlines()
+            x = 1
+            if preview:
+                x = next((row.index("Markdown preview") for row in rows if "Markdown preview" in row), -1)
+                if x == -1:
+                    return False
+            content = [row[x:-1].strip() for row in rows]
+            return any(content[i : i + len(expected_lines)] == expected_lines for i in range(len(rows)))
+
+        paste(markdown)
+        send("C-p")
+        wait_for("line and paragraph breaks in the TUI note preview", lambda: shows_note_lines(preview=True))
+        send("Escape", ":", "w", "q", "Enter")
         first_turn = api.request("journey", project=PROJECT)[0]["turn"]
-        wait_for(
-            "the clicked turn's saved note",
-            lambda: any(
-                note["turn"] == first_turn and note["body"] == MOUSE_NOTE
-                for note in api.request("notes", project=PROJECT)
-            ),
-        )
+        wait_for("the saved title and indented contents", lambda: any(
+            note["turn"] == first_turn and note["title"] == title
+            and note["body"] == markdown
+            for note in api.request("notes", project=PROJECT)
+        ))
+        wait_for("the editor to close", lambda: "[Close]" not in screen())
+        wait_for("the Korean note in the board", lambda: title in screen())
+        click_label(title)
+        wait_for("line and paragraph breaks in the TUI note detail", shows_note_lines)
+        assert screen().count(title) == 1
+        assert action_bar("[Close] Esc", "[Edit] e", "[Status] s", "[Cut] x", "[Delete] D")
+        click_label("[Status] s", offset=len("[Status] "))
+        wait_for("the normal note status", lambda: "Status · Normal" in screen())
+        assert action_bar("[Highlighted] 1", "[Normal] 2", "[Low priority] 3", "[Cancel] Esc")
+        send("1")
+        wait_for("the highlighted note marker", lambda: "★ " + title in screen())
+        click_label("[Delete]")
+        wait_for("the delete confirmation actions", lambda: action_bar("[Cancel]", "[Delete]"))
+        click_label("[Cancel]")
+        wait_for("the note actions after cancelling", lambda: action_bar("[Close]", "[Edit]", "[Cut]", "[Delete]"))
+        send("Escape")
         click_label("[Back]")
+        wait_for("the overview and its original selection", lambda: selected(NOTE_TASK))
+        send("n")
+        wait_for("the in-place project note editor", lambda: "Insert ·" in screen())
+        paste(PROJECT_NOTE)
+        wait_for("the autosaved project note", lambda: any(
+            note["title"] == "Untitled note" and note["body"] == PROJECT_NOTE and note["turn"] is None
+            for note in api.request("notes", project=PROJECT)
+        ))
+        send("Escape", "Escape")
+        wait_for("the project axis after editing", lambda: axis("3 Project notes") and "[Close]" not in screen())
+        send("Escape", "2")
+        wait_for("the turn notes axis", lambda: axis("2 Turn notes"))
+        send("g", "g")
         wait_for(
-            "the overview and its original turn selection",
-            lambda: "Project notes" in screen().splitlines()[2] and selected(NOTE_TASK),
+            "the first turn note selected",
+            lambda: re.search(r"› (?:\[\d+/\d+\] )?" + re.escape(NOTE), screen()),
         )
-        subprocess.run(target + ["n"], check=True)
-        wait_for("the TUI note input", lambda: "Empty line cancels" in screen())
-        subprocess.run(target + ["-l", PROJECT_NOTE], check=True)
-        subprocess.run(target + ["Enter"], check=True)
-        wait_for(
-            "the saved TUI note",
-            lambda: any(
-                note["body"] == PROJECT_NOTE and note["turn"] is None
-                for note in api.request("notes", project=PROJECT)
-            ),
-        )
-        subprocess.run(target + ["2"], check=True)
-        wait_for(
-            "the turn notes axis",
-            lambda: screen().splitlines()[1] == "[Back] Axes · 2 Turn notes",
-        )
-        subprocess.run(target + ["Enter"], check=True)
-        wait_for(
-            "an individual turn note",
-            lambda: (
-                f"[Close] Turn note · {TASK}" in screen().splitlines()[2]
-                and NOTE in screen()
-            ),
-        )
-        subprocess.run(target + ["Escape"], check=True)
-        wait_for(
-            "the returned turn notes view",
-            lambda: screen().splitlines()[1] == "[Back] Axes · 2 Turn notes",
-        )
-        subprocess.run(target + ["Escape"], check=True)
-        wait_for(
-            "the overview after leaving turn notes",
-            lambda: "Project notes" in screen().splitlines()[2],
-        )
+        send("Enter")
+        wait_for("an individual turn note", lambda: "[Close]" in screen() and NOTE in screen())
+        send("Escape")
+        wait_for("the restored turn notes view", lambda: axis("2 Turn notes") and "[Close]" not in screen())
+        send("Escape")
+        wait_for("the overview after leaving turn notes", lambda: "[Back]" not in screen())
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=channel)
             try:
@@ -404,12 +447,59 @@ def check_clients(path, repo, cli, env, api, channel):
                 page.get_by_role("link", name=PROJECT, exact=True).click()
                 page.get_by_text(NOTE, exact=True).wait_for()
                 page.get_by_text(PROJECT_NOTE, exact=True).wait_for()
+                linked_turn = page.locator(".rowbtn").filter(has_text=TASK).first
+                linked_note = page.get_by_role("button", name=NOTE, exact=True)
+                linked_turn.focus()
+                page.keyboard.press("l")
+                assert linked_note.evaluate("(note) => document.activeElement === note")
+                page.keyboard.press("h")
+                assert linked_turn.evaluate("(turn) => document.activeElement === turn")
+                page.get_by_role("button", name="Untitled note", exact=True).wait_for()
+                page.get_by_role("button", name=title, exact=True).click()
+                page.get_by_role("group", name="Note actions").get_by_role("button", name="Edit").wait_for()
+                assert page.locator("#modalTitle").inner_text() == "★ " + title
+                assert page.locator("dialog .markdown h2").count() == 0
+                page.get_by_role("button", name="Status", exact=True).click()
+                options = page.get_by_role("group", name="Note status")
+                assert options.get_by_role("button", name="Highlighted", pressed=True).count() == 1
+                options.get_by_role("button", name="Low priority").click()
+                page.locator('#modalTitle[data-priority="low"]').wait_for()
+                note_paragraphs = page.locator("dialog .markdown p")
+                note_paragraphs.nth(1).wait_for()
+                assert note_paragraphs.all_inner_texts() == ["\n".join(expected_lines[:3]), paragraph]
+                page.get_by_role("dialog").get_by_role("button", name="Edit", exact=True).click()
+                page.get_by_role("group", name="Editor actions").get_by_role("button", name="Preview").click()
+                page.locator("dialog .note-preview h2").filter(has_text=title).wait_for()
+                preview_paragraphs = page.locator("dialog .note-preview p")
+                preview_paragraphs.nth(1).wait_for()
+                assert preview_paragraphs.all_inner_texts() == ["\n".join(expected_lines[:3]), paragraph]
+                page.get_by_role("button", name="Close", exact=True).click()
                 page.locator(".note").filter(has_text=NOTE).get_by_role(
                     "button", name="Edit", exact=True
                 ).click()
-                page.get_by_label("Note text").fill(EDIT)
+                assert page.get_by_label("Note title").count() == 0
+                page.get_by_label("Note text").fill("## " + EDIT)
                 page.get_by_role("button", name="Save", exact=True).click()
-                page.get_by_text(EDIT, exact=True).wait_for()
+                page.get_by_text("Insert · Saved", exact=True).wait_for()
+                page.get_by_role("button", name="Close", exact=True).click()
+                page.get_by_role("button", name=EDIT, exact=True).wait_for()
+                page.evaluate("""() => {
+                    const fetchOriginal = window.fetch.bind(window);
+                    window.fetch = (url, options) => {
+                        if (!String(url).startsWith('/api/transcript?')) return fetchOriginal(url, options);
+                        window.fetch = fetchOriginal;
+                        return new Promise((resolve, reject) => {
+                            options.signal.addEventListener('abort', () => {
+                                window.fixtureTranscriptAborted = true;
+                                reject(options.signal.reason);
+                            }, { once: true });
+                        });
+                    };
+                }""")
+                linked_turn.click()
+                page.get_by_text("Loading transcript…", exact=True).wait_for()
+                page.get_by_role("button", name="Close", exact=True).click()
+                page.wait_for_function("window.fixtureTranscriptAborted === true")
                 page.locator(".rowbtn").filter(has_text=TASK).first.click()
                 page.locator("dialog").get_by_text(ANSWER, exact=True).wait_for()
                 page.get_by_role("button", name="Close", exact=True).click()
@@ -421,10 +511,21 @@ def check_clients(path, repo, cli, env, api, channel):
                 page.get_by_label("Journey", exact=True).check()
                 cells = page.locator(".journey-cell")
                 cells.filter(has_text="Add a blank-line case").wait_for()
-                if cells.locator(".graph-point").count() != 7:
+                if cells.locator(".graph-point").count() != len(api.request("board", project=FIXTURE)["turns"]):
                     raise RuntimeError("Each fixture turn needs one graph point")
                 first = cells.filter(has_text="Review the sample import")
                 next_turn = cells.filter(has_text="Check the setup guide")
+                gutter = first.locator(".journey-graph").bounding_box()
+                turn = first.locator(".rowbtn").bounding_box()
+                if turn["x"] <= gutter["x"] + gutter["width"]:
+                    raise RuntimeError("The browser session graph needs space between its border and the turn card")
+                border = first.evaluate("""cell => {
+                    const card = cell.closest(".board-card");
+                    return card.getBoundingClientRect().x +
+                        parseFloat(getComputedStyle(card, "::before").left);
+                }""")
+                if abs(border - turn["x"]) > 1:
+                    raise RuntimeError("The browser card border must begin beyond the session graph")
                 above = first.locator(".graph-track.outgoing").bounding_box()
                 below = next_turn.locator(".graph-track.through").bounding_box()
                 if (
@@ -438,6 +539,70 @@ def check_clients(path, repo, cli, env, api, channel):
                 cells.filter(has_text="Add an empty-input test").get_by_text(
                     "Fork of review", exact=True
                 ).wait_for()
+                card = page.locator(".board-card.paired").filter(has_text="Try the import on a larger fixture")
+                card.get_by_role("button", name="Larger fixture", exact=True).wait_for()
+                card.get_by_role("button", name="Baseline run", exact=True).wait_for()
+                records = page.get_by_role("region", name="Journey and Turn notes")
+                project_notes = page.get_by_role("region", name="Project notes", exact=True)
+                if not all(pane.evaluate("(p) => p.scrollHeight > p.clientHeight") for pane in (records, project_notes)):
+                    raise RuntimeError("Both fixture panes must have scrollable content")
+                project_notes.evaluate("(p) => { p.scrollTop = p.scrollHeight; }")
+                if not project_notes.evaluate("(p) => p.scrollTop") or records.evaluate("(p) => p.scrollTop"):
+                    raise RuntimeError("Project notes must scroll independently of the linked turn cards")
+                review = first.locator(".session-id")
+                assert review.inner_text() == "review"
+                assert review.evaluate("(label) => getComputedStyle(label).color === " +
+                    "getComputedStyle(label.closest('.journey-cell').querySelector('.graph-point')).backgroundColor")
+                frame_background = "(cell) => getComputedStyle(cell.closest('.board-card')).backgroundImage"
+                assert first.evaluate(frame_background) == "none"
+                first.locator(".rowbtn").focus()
+                review_cards = records.locator('[data-session="review"]')
+                assert review_cards.count() > 1
+                assert records.locator(".board-card.selected-session").count() == review_cards.count()
+                assert records.locator('[data-session="review"].selected-session').count() == review_cards.count()
+                background = first.evaluate(frame_background)
+                assert background.startswith("linear-gradient(")
+                assert first.locator("..").locator(".turn-notes-cell").evaluate(frame_background) == background
+                page.keyboard.press("j")
+                assert next_turn.locator("..").evaluate("(card) => card.classList.contains('selected-session')")
+                assert records.locator('[data-session="review"].selected-session').count() == 0
+                assert first.evaluate(frame_background) == "none"
+                page.get_by_text("Session filter", exact=True).click()
+                session = page.get_by_role("combobox", name="Session")
+                session.select_option("review")
+                page.get_by_role("button", name="Highlight", exact=True).click()
+                page.get_by_role("button", name="Highlight", exact=True, pressed=True).wait_for()
+                assert records.locator('[data-session="review"].selected-session').count() == review_cards.count()
+                next_turn.locator(".rowbtn").focus()
+                assert records.locator('[data-session="docs"].selected-session').count() == 0
+                project_scroll = project_notes.evaluate("(p) => p.scrollTop")
+                page.get_by_role("button", name="Show only", exact=True).click()
+                next_turn.wait_for(state="detached")
+                assert records.locator('.board-card:not([data-session="review"])').count() == 0
+                assert project_notes.evaluate("(p) => p.scrollTop") == project_scroll
+                assert page.get_by_role("button", name="Earlier turns", exact=True).count() == 0
+                page.get_by_role("button", name="Clear filter", exact=True).click()
+                next_turn.wait_for()
+                next_turn.locator(".rowbtn").focus()
+                for keys, prompt in (
+                    (("g", "g"), "Review archived import case 21"),
+                    (("G",), "Summarize import changes"),
+                    (("[",), "Review archived import case 20"),
+                    (("]",), "Review archived import case 21"),
+                    (("<",), "Review archived import case 00"),
+                    ((">",), "Summarize import changes"),
+                ):
+                    for key in keys:
+                        page.keyboard.press(key)
+                    records.locator(".rowbtn:focus").filter(has_text=prompt).wait_for()
+                page.get_by_role("button", name="Earlier turns", exact=True).click()
+                cells.filter(has_text="Review archived import case 00").wait_for()
+                page.get_by_role("button", name="Newer turns", exact=True).click()
+                first.wait_for()
+                page.get_by_role("button", name="Earlier project notes", exact=True).click()
+                project_notes.get_by_role("button", name="Archived project note 00", exact=True).wait_for()
+                page.get_by_role("button", name="Newer project notes", exact=True).click()
+                project_notes.get_by_role("button", name="Blank records", exact=True).wait_for()
                 stats = subprocess.check_output([cli, "stats"], env=env, text=True)
                 if not all(label in stats for label in ("Database", "Last 30 days", PROJECT)):
                     raise RuntimeError("The CLI did not show the server's storage statistics")
@@ -449,38 +614,62 @@ def check_clients(path, repo, cli, env, api, channel):
                 largest = page.get_by_role("table", name="Largest turns")
                 largest.get_by_role("button", name=SUMMARY, exact=True).click()
                 page.get_by_role("dialog").get_by_text(ANSWER, exact=True).wait_for()
+                legacy_browser_pages(browser, api, page.context.cookies())
                 if errors:
                     raise RuntimeError(f"Browser errors: {errors}")
             finally:
                 browser.close()
-        wait_for(
-            "the edited note in the TUI", lambda: "Keep the regression" in screen()
-        )
-        # The note display is clipped to the column width, but the whole row opens it.
-        mouse(0, 110, 3, click=True)
-        wait_for(
-            "an individual project note",
-            lambda: (
-                "[Close] Project note" in screen().splitlines()[2]
-                and PROJECT_NOTE in screen()
-            ),
-        )
-        subprocess.run(target + ["e"], check=True)
-        wait_for(
-            "the project note edited by mouse",
-            lambda: any(
-                note["body"] == MOUSE_EDIT and note["turn"] is None
-                for note in api.request("notes", project=PROJECT)
-            ),
-        )
-        click_label("[Close]")
-        wait_for(
-            "the returned project notes view",
-            lambda: screen().splitlines()[1] == "[Back] Axes · 3 Project notes",
-        )
-        subprocess.run(target + ["q"], check=True)
+        wait_for("the edited note in the TUI", lambda: "Keep the regression" in screen())
+        send("3", "Enter")
+        wait_for("an individual project note", lambda:
+                 "[Edit]" in screen() and PROJECT_NOTE in screen())
+        send("e")
+        wait_for("the project note's Normal mode", lambda: "Normal ·" in screen())
+        send("d", "d", "i")
+        wait_for("the project note's Insert mode", lambda: "Insert ·" in screen())
+        paste(MOUSE_EDIT)
+        send("Escape", ":", "w", "q", "Enter")
+        wait_for("the project note edited in place", lambda: any(
+            note["body"] == MOUSE_EDIT and note["turn"] is None
+            for note in api.request("notes", project=PROJECT)
+        ))
+    except RuntimeError as error:
+        raise RuntimeError(f"{error}\nTerminal state:\n{screen()}") from error
     finally:
-        subprocess.run(tmux + ["kill-server"], check=False, capture_output=True)
+        stop_tmux(tmux, "journal")
+
+
+def check_closed_terminal(cli, env):
+    # A detached PTY can disappear without delivering SIGHUP to the client.
+    with contextlib.ExitStack() as resources:
+        master, slave = os.openpty()
+        terminal_attributes = termios.tcgetattr(slave)
+        terminal_attributes[0] |= termios.IXON
+        termios.tcsetattr(slave, termios.TCSANOW, terminal_attributes)
+        output = resources.enter_context(os.fdopen(master, "rb", buffering=0))
+        resources.callback(os.close, slave)
+        terminal = resources.enter_context(child(
+            [cli, "tui", "--project", PROJECT],
+            stdin=slave, stdout=slave, stderr=slave,
+            env=env | {"TERM": "xterm-256color"},
+        ))
+        deadline = time.monotonic() + 8
+        data = bytearray()
+        while b"\x1b[?2004h" not in data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
+                raise RuntimeError("The test client did not enter terminal mode")
+            chunk = output.read(4096)
+            if not chunk:
+                raise RuntimeError("The test client closed its terminal during startup")
+            data.extend(chunk)
+        if termios.tcgetattr(slave)[0] & termios.IXON:
+            raise RuntimeError("Terminal flow control intercepts Ctrl+S in the editor")
+        output.close()
+        try:
+            terminal.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("The TUI stayed alive after its input terminal closed") from error
 
 
 def smoke(path, binary, channel, cli):
@@ -519,9 +708,10 @@ def smoke(path, binary, channel, cli):
     ):
         provider.note_summary_started = threading.Event()
         provider.release_note_summary = threading.Event()
-        threading.Thread(target=provider.serve_forever, daemon=True).start()
+        provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        provider_thread.start()
         try:
-            line = server.stdout.readline()
+            line = startup_line(server)
             match = re.fullmatch(r"Journal listening on (.+)\n", line)
             if not match:
                 raise RuntimeError("Could not read the local journal server address")
@@ -586,7 +776,16 @@ def smoke(path, binary, channel, cli):
             if json.loads(hooks_file.read_text())["hooks"]["Interrupt"] != [unrelated_hook]:
                 raise RuntimeError("Setup changed an unrelated Codex hook")
 
+            observer_directory = Path(settings["AGENT_JOURNAL_HOME"])
+            observer_sessions = set()
+
+            def stop_observers():
+                observer_sessions.update(observer_groups(observer_directory))
+                for group in observer_sessions:
+                    stop_group(group)
+
             with contextlib.ExitStack() as processes:
+                processes.callback(stop_observers)
                 processes.enter_context(
                     child(
                         [
@@ -602,6 +801,7 @@ def smoke(path, binary, channel, cli):
                         env=codex_env,
                     )
                 )
+                processes.callback(provider.release_note_summary.set)
                 wait_for("the Codex socket", rpc.exists)
                 with contextlib.closing(Codex(rpc)) as codex:
                     hooks = codex.call(
@@ -652,6 +852,7 @@ def smoke(path, binary, channel, cli):
                             row["project"] == PROJECT for row in api.request("projects")
                         ),
                     )
+                    observer_sessions.update(observer_groups(observer_directory))
                     session = codex.call("thread/start", options)["thread"]["id"]
                     turn = start_turn(codex, session, TASK)
                     unknown = path / "unknown"
@@ -709,7 +910,7 @@ def smoke(path, binary, channel, cli):
                     if (
                         len(notes) != 1
                         or notes[0]["turn"] != turn
-                        or notes[0]["body"] != NOTE
+                        or notes[0]["body"] != "# " + NOTE
                     ):
                         raise RuntimeError(
                             "The Codex MCP note did not land on the previous turn"
@@ -749,8 +950,12 @@ def smoke(path, binary, channel, cli):
 
                     wait_for("the collector to stop after the last session", collector_exited)
                 check_clients(path, repo, cli, environment, api, channel)
+                check_closed_terminal(cli, environment)
         finally:
             provider.shutdown()
+            provider_thread.join(timeout=5)
+            if provider_thread.is_alive():
+                raise RuntimeError("The test model server did not stop")
 
 
 def main():
@@ -771,8 +976,8 @@ def main():
     binary = shutil.which(args.codex)
     if not binary or not shutil.which("tmux") or not shutil.which("git"):
         parser.error("Install Codex CLI, tmux, and Git before running the smoke test")
-    with tempfile.TemporaryDirectory(prefix="aj-smoke-", dir="/tmp") as directory:
-        smoke(Path(directory), binary, args.browser_channel, args.client.resolve())
+    with cleanup_on_termination(), test_workspace("aj-smoke-") as directory:
+        smoke(directory, binary, args.browser_channel, args.client.resolve())
     print("Local Codex, summary, observer, MCP, TUI, and browser smoke test passed.")
 
 

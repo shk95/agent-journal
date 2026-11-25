@@ -1,11 +1,14 @@
 [Unit]
 Description=Agent Journal
-After=network.target
+Requires=agent-journal-recover.service
+After=network.target agent-journal-recover.service
 
 [Service]
 User=journal
 Group=journal
 EnvironmentFile=/etc/agent-journal/server.env
+EnvironmentFile=/etc/agent-journal/deployment-probe.env
+Environment=AGENT_JOURNAL_DEPLOYMENT_STATE=/opt/agent-journal/current/data/startup-error.json
 UMask=0077
 ExecStart=/opt/agent-journal/current/package/bin/agent-journal serve --database /opt/agent-journal/current/data/journal.sqlite3 --deployment-id-file /opt/agent-journal/current/id --maintenance-file /opt/agent-journal/maintenance
 Restart=on-failure

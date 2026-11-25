@@ -29,6 +29,7 @@ body > header {
 }
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -167,19 +168,50 @@ input[type="checkbox"] {
   --lane-step: 18px;
   --lane-start: 16px;
   --graph-width: calc(12px + var(--lane-count) * var(--lane-step));
+  --graph-gap: 8px;
   --graph-point: 22px;
   --graph-paper: #f0f2eb;
   --journey-padding: 12px 14px;
+  --record-columns: minmax(0, 2fr) minmax(0, 1fr);
   display: grid;
   align-items: start;
-  border-top: 2px solid var(--ink);
-  overflow: auto;
+  gap: 12px;
 }
-.head,
-.cell,
-.free {
-  padding: 12px 14px;
+.board.with-project {
+  grid-template-columns: minmax(0, var(--record-pane-width)) minmax(0, 1fr);
+}
+.board-pane {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.pane-head, .board-card {
+  display: grid;
+  min-width: 0;
   border-bottom: 1px solid var(--line);
+}
+.pane-head.paired, .board-card.paired {
+  grid-template-columns: var(--record-columns);
+}
+.paired > :nth-child(2) {
+  border-inline-start: 1px solid var(--line);
+}
+.board-scroll {
+  max-height: 64vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.board-scroll:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+}
+.board-card:last-child {
+  border-bottom: 0;
+}
+.head, .cell {
+  padding: 12px 14px;
   min-width: 0;
 }
 .head {
@@ -194,6 +226,22 @@ input[type="checkbox"] {
   align-self: stretch;
   min-height: 70px;
 }
+.turn-notes-cell {
+  overflow-wrap: anywhere;
+}
+.turn-notes-cell .note {
+  margin: 5px 0;
+}
+.turn-notes-cell .note-card {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.journey-paste {
+  grid-column: 2;
+  justify-self: start;
+  margin: 0 10px 8px;
+}
 .rowbtn {
   width: 100%;
   border: 0;
@@ -201,12 +249,48 @@ input[type="checkbox"] {
   text-align: left;
   padding: 0;
 }
+.board-pane.graph-pane {
+  border-color: transparent;
+  border-radius: 0;
+}
+.with-graph {
+  --turn-card-start: calc(var(--graph-width) + var(--graph-gap));
+  position: relative;
+  border-bottom: 0;
+}
+.with-graph::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: var(--turn-card-start);
+  inset-inline-end: 0;
+  inset-block: 0;
+  border-inline: 1px solid var(--line);
+  border-block-end: 1px solid var(--line);
+  pointer-events: none;
+  z-index: 1;
+}
+.pane-head.with-graph::before {
+  border-block-start: 1px solid var(--line);
+}
 .journey-head {
-  padding-left: calc(var(--graph-width) + 14px);
+  position: relative;
+  margin-inline-start: calc(var(--graph-width) + var(--graph-gap));
+}
+.journey-head::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: calc(100% + var(--graph-gap));
+  width: var(--graph-width);
+  background: var(--graph-paper);
+  border: 1px solid var(--line);
+  border-block-end: 0;
 }
 .cell.journey-cell {
   display: grid;
   grid-template-columns: var(--graph-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  column-gap: var(--graph-gap);
   padding: 0;
 }
 .journey-cell .rowbtn {
@@ -216,8 +300,17 @@ input[type="checkbox"] {
   padding: var(--journey-padding);
   border-radius: 0;
 }
-.journey-cell .rowbtn:hover {
+.board-card:not(.selected-session) .journey-cell .rowbtn:hover {
   background: #f1f4ec;
+}
+.board-card.selected-session {
+  --session-tint: #d9e4d7;
+  background-image: linear-gradient(to right, transparent var(--turn-card-start), var(--session-tint) var(--turn-card-start));
+}
+@supports (color: color-mix(in srgb, black, white)) {
+  .board-card.selected-session {
+    --session-tint: color-mix(in srgb, var(--session-color) 22%, var(--paper));
+  }
 }
 .journey-cell .rowbtn:focus-visible {
   outline: 2px solid var(--green);
@@ -225,9 +318,12 @@ input[type="checkbox"] {
 }
 .journey-graph {
   position: relative;
-  margin-bottom: -1px;
+  grid-row: 1 / 3;
   background: var(--graph-paper);
-  border-right: 1px solid #dce1d6;
+  border-inline: 1px solid var(--line);
+}
+.board-card:last-child .journey-graph {
+  border-block-end: 1px solid var(--line);
 }
 .journey-graph > span {
   --track-x: calc(var(--lane-start) + var(--lane) * var(--lane-step));
@@ -274,8 +370,32 @@ input[type="checkbox"] {
   border-radius: 50%;
   z-index: 2;
 }
+.journey-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
 .session-id {
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
+  color: var(--session-color);
+  background: #edf0e8;
+  font: 650 12px/1.6 ui-monospace, monospace;
+}
+.session-id::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.selected-session .session-id {
+  background: transparent;
+  font-weight: 800;
 }
 .fork-context {
   flex-basis: 100%;
@@ -309,10 +429,6 @@ input[type="checkbox"] {
   font-size: 12px;
   padding: 2px 6px;
 }
-.free {
-  grid-row: 2 / span 1;
-  align-self: start;
-}
 .empty {
   color: var(--muted);
 }
@@ -332,12 +448,14 @@ dialog::backdrop {
 dialog header {
   position: sticky;
   top: 0;
-  background: var(--paper);
+  z-index: 1;
+  background: #eff1e9;
   padding: 14px 20px;
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
 }
 #modalBody {
   padding: 18px 20px;
@@ -370,6 +488,100 @@ textarea {
   border-left: 2px solid #9cb6a1;
   padding-left: 8px;
 }
+.note-title {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  font-weight: 650;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.note-title[data-priority="highlighted"],
+#modalTitle[data-priority="highlighted"] {
+  font-weight: 750;
+}
+.note-title[data-priority="low"],
+#modalTitle[data-priority="low"] {
+  color: var(--muted);
+  font-weight: 500;
+}
+.note-actions button[aria-pressed="true"] {
+  border-color: var(--green);
+  background: #dcebe0;
+}
+.note-excerpt {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #eff1e9;
+}
+.note-editor .note-actions {
+  margin-top: 0;
+}
+.note-editor > label {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.note-editor textarea {
+  min-height: 9em;
+}
+.note-preview {
+  display: none;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.show-preview .note-preview {
+  display: block;
+}
+@media (min-width: 810px) {
+  .note-editor.show-preview {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 14px;
+  }
+  .show-preview > .note-actions,
+  .show-preview > .note-conflict {
+    grid-column: 1 / -1;
+  }
+  .show-preview > .note-source {
+    grid-row: 2;
+    grid-column: 1;
+  }
+  .show-preview > .note-preview {
+    grid-row: 2;
+    grid-column: 2;
+  }
+}
+.markdown {
+  overflow-wrap: anywhere;
+}
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 1em 0 .45em;
+}
+.markdown blockquote {
+  border-inline-start: 2px solid #9cb6a1;
+  padding-inline-start: 12px;
+  margin-inline: 0;
+}
+.markdown code {
+  background: #ecefe7;
+}
 @media (max-width: 650px) {
   main {
     padding: 20px 12px;
@@ -384,18 +596,50 @@ textarea {
     --journey-padding: 8px;
     font-size: 14px;
   }
-  .head,
-  .cell,
-  .free {
-    padding: 8px;
+  .board.with-project {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .head.journey-head {
-    padding-left: calc(var(--graph-width) + 8px);
+  .head,
+  .cell {
+    padding: 8px;
   }
   .heading {
     margin-bottom: 12px;
   }
 }
 
-.pagination { display: flex; gap: 10px; margin-bottom: 12px; }
+.pagination { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
 .pagination:empty { display: none; }
+.session-filter {
+  margin-bottom: 12px;
+}
+.session-filter summary {
+  width: fit-content;
+  color: var(--green);
+  font-weight: 650;
+  cursor: pointer;
+}
+.session-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #eff1e9;
+}
+.session-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.session-controls select {
+  min-width: 0;
+}
+.session-controls button[aria-pressed="true"] {
+  border-color: var(--green);
+  background: #dcebe0;
+}

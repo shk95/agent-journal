@@ -24,7 +24,14 @@ class CodexFixture:
     def __init__(self, path, thread, turns):
         self.thread, self.turns = thread, turns
         self.server = unix_serve(self.client, str(path))
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server_thread.join(timeout=5)
+        if self.server_thread.is_alive():
+            raise RuntimeError("The Codex fixture did not stop")
 
     def client(self, websocket):
         for raw in websocket:
@@ -158,4 +165,4 @@ class LocalStackTest(unittest.TestCase):
             )
         finally:
             for fixture in (local, remote):
-                fixture.server.shutdown()
+                fixture.close()

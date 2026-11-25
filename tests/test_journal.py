@@ -234,6 +234,134 @@ class TestJournal(unittest.TestCase):
             "Storage statistics are unavailable on this Journal server.", file=sys.stderr
         )
 
+    def test_session_board_filter_scopes_pages_and_turn_notes(self):
+        project = "test/p"
+        start = int(time())
+        with closing(connect(self.server.database)) as db, db:
+            db.executemany(
+                """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,items,revision)
+                   VALUES(?,?,?,?, 'completed', '', '', '[]', 1)""",
+                [(project, "chosen", str(i), start + i) for i in range(66)]
+                + [(project, "other", "earliest", start - 1), (project, "other", "latest", start + 70)],
+            )
+        for session, turn, identifier in (("chosen", "20", "inside"), ("other", "earliest", "outside")):
+            self.api.request("notes", {"project": project, "id": identifier,
+                                       "thread": session, "turn": turn, "body": "Fixture"})
+        self.api.request("notes", {"project": project, "id": "project-note", "body": "Fixture"})
+        self.assertEqual(self.api.request("sessions", project=project), ["chosen", "other"])
+        scoped = self.api.request("board", project=project, thread="chosen")
+        self.assertEqual({row["thread"] for row in scoped["turns"]}, {"chosen"})
+        self.assertTrue(scoped["earlier"])
+        self.assertFalse(scoped["later"])
+        self.assertEqual([note["id"] for note in scoped["turn_notes"]], ["inside"])
+        self.assertEqual([note["id"] for note in scoped["project_notes"]], ["project-note"])
+        first = self.api.request("board", project=project, thread="chosen", edge="first")
+        self.assertFalse(first["earlier"])
+        self.assertTrue(first["later"])
+        note_edge = self.api.request("board", project=project, thread="chosen", edge="first-note")
+        self.assertEqual(note_edge["turns"][0]["turn"], "20")
+
+    def test_note_titles_move_delete_and_scoped_board(self):
+        project = "test/p"
+        now = int(time())
+        with closing(connect(self.server.database)) as db, db:
+            db.executemany(
+                """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,items,revision)
+                   VALUES(?,?,?,?, 'completed', '', '', '[]', 1)""",
+                [(project, "example-thread", str(i), now - 80 + i) for i in range(66)],
+            )
+        body = "## 예제 제목\n\n  한글\n\n    mixed 👩‍💻\n"
+        new_note = {
+            "project": project, "id": "new-note", "thread": "example-thread",
+            "turn": "65", "format": "markdown", "body": body, "priority": "highlighted",
+        }
+        self.assertEqual(
+            self.api.request("notes", new_note),
+            {"id": "new-note", "version": 1, "matches": True},
+        )
+        old_note = new_note | {"id": "older-note", "turn": "1", "body": "old " * 1000}
+        self.api.request("notes", old_note)
+        page = self.api.request("board", project=project)
+        self.assertEqual([row["id"] for row in page["turn_notes"]], ["new-note"])
+        self.assertNotIn("body", page["turn_notes"][0])
+        same = self.api.request("board", project=project, revision=page["revision"])
+        self.assertTrue(same["unchanged"])
+        oldest = self.api.request("board", project=project, edge="first-note")
+        self.assertEqual(oldest["turns"][0]["turn"], "1")
+        self.assertTrue(oldest["later"])
+        detail = self.api.request("note", project=project, id="new-note")
+        self.assertEqual((detail["title"], detail["body"]), ("예제 제목", body))
+        move = new_note | {"turn": "10", "version": 1}
+        moved = self.api.request("move-note", move)
+        self.assertEqual(moved["priority"], "highlighted")
+        self.assertEqual(moved["version"], 2)
+        self.assertEqual(self.api.request("move-note", move), moved)
+        self.assertEqual((moved["created"], moved["title"], moved["body"]),
+                         (detail["created"], detail["title"], body))
+        with self.assertRaisesRegex(JournalHTTPError, "409"):
+            self.api.request("delete-note", move)
+        with self.assertRaisesRegex(JournalHTTPError, "404"):
+            self.api.request("move-note", move | {"version": 2, "turn": "missing"})
+        self.assertEqual(self.api.request("note", project=project, id="new-note")["turn"], "10")
+        self.api.request("delete-note", move | {"version": 2})
+        self.api.request("delete-note", move | {"version": 2})
+        self.assertEqual(
+            self.api.request("stats", project=project)["projects"][0]["note_bytes"],
+            len(old_note["body"].encode("utf-8")),
+        )
+
+    def test_note_status_and_body_share_version_and_keep_their_values(self):
+        key = {"id": "priority-note", "project": "test/p"}
+        source = "# Example\n\nOriginal"
+        self.api.request("notes", key | {"body": source})
+        self.assertEqual(self.api.request("note", **key)["priority"], "normal")
+        update = key | {"version": 1, "priority": "low"}
+        row = self.api.request("set-note-priority", update)
+        self.assertEqual((row["version"], row["priority"], row["body"]), (2, "low", source))
+        self.assertEqual(self.api.request("set-note-priority", update), row)
+        with self.assertRaisesRegex(JournalHTTPError, "400"):
+            self.api.request("set-note-priority", update | {"priority": "unknown"})
+        with self.assertRaisesRegex(JournalHTTPError, "409"):
+            self.api.request("set-note-priority", update | {"priority": "highlighted"})
+        self.api.request("edit-note", key | {"version": 2, "body": "Replacement"})
+        summary = self.api.request("board", project="test/p")["project_notes"][0]
+        self.assertEqual((summary["created"], summary["priority"]), (row["created"], "low"))
+
+    def test_markdown_title_updates_and_ignores_headings_inside_other_blocks(self):
+        fields = {"project": "test/p", "id": "markdown-note", "format": "markdown"}
+        source = "```text\n# Code\n```\n\n> # Quote\n\n    # Indented\n\n한글 **샘플**\n===\n"
+        self.api.request("notes", fields | {"body": source})
+        note = self.api.request("note", project="test/p", id="markdown-note")
+        self.assertEqual((note["title"], note["body"]), ("한글 샘플", source))
+        untitled = source.split("한글")[0] + "Plain paragraph."
+        self.api.request("edit-note", fields | {"body": untitled, "version": 1})
+        note = self.api.request("board", project="test/p")["project_notes"][0]
+        self.assertEqual(note["title"], "Untitled note")
+        self.api.request("edit-note", fields | {"body": "# New heading\n", "version": 2})
+        self.assertEqual(
+            self.api.request("note", project="test/p", id="markdown-note")["title"],
+            "New heading",
+        )
+
+    def test_migration_promotes_existing_title_to_markdown_once(self):
+        path = self.path / "legacy"
+        with closing(connect(path)) as db:
+            db.executescript(SCHEMA)
+            with db:
+                db.execute("ALTER TABLE notes ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+                db.execute("INSERT INTO projects VALUES('test/p',0,1)")
+                db.execute(
+                    "INSERT INTO notes(id, project, title, body, created) VALUES(?, ?, ?, ?, 1)",
+                    ("legacy", "test/p", "한글 *fixture* #", "## Keeping the original body"),
+                )
+        for _ in range(2):
+            make_server("127.0.0.1", 0, path, "test-token").server_close()
+            with closing(connect(path)) as db:
+                row = db.execute("SELECT title,body,version FROM notes").fetchone()
+                self.assertEqual(
+                    tuple(row), ("한글 *fixture* #", r"# 한글 \*fixture\* \#" + "\n\n## Keeping the original body", 1)
+                )
+
     def test_web_command_opens_configured_journal(self):
         for options, fragment in (
             ([], ""),

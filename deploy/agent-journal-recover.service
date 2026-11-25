@@ -1,0 +1,9 @@
+[Unit]
+Description=Reconcile the Agent Journal deployment before serving
+Before=agent-journal.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/agent-journal/server_deploy.py boot-recover

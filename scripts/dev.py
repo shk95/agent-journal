@@ -54,8 +54,104 @@ def seed(api):
             "Add a blank-line case",
             "Blank lines are ignored",
         ),
+        (
+            "review",
+            "08",
+            None,
+            "Inspect a file with mixed line endings",
+            "Normalized line endings",
+        ),
+        ("docs", "09", None, "Document the input format", "Added a delimiter example"),
+        (
+            "review",
+            "10",
+            None,
+            "Read a quoted field",
+            "The delimiter stays in the field",
+        ),
+        (
+            "tests",
+            "11",
+            ("review", "10"),
+            "Cover quoted delimiters",
+            "Both escape cases pass",
+        ),
+        (
+            "docs",
+            "12",
+            None,
+            "Describe malformed rows",
+            "Documented the rejection message",
+        ),
+        (
+            "review",
+            "13",
+            None,
+            "Review duplicate headers",
+            "Duplicate names are rejected",
+        ),
+        (
+            "tests",
+            "14",
+            None,
+            "Add a duplicate-header fixture",
+            "The test names the header",
+        ),
+        (
+            "docs",
+            "15",
+            None,
+            "Check the quickstart example",
+            "The copyable command works",
+        ),
+        (
+            "review",
+            "16",
+            None,
+            "Check a multilingual sample",
+            "Preserved 한글 and accents",
+        ),
+        (
+            "tests",
+            "17",
+            ("review", "16"),
+            "Verify Unicode round-tripping",
+            "Stored and reopened the same text",
+        ),
+        (
+            "docs",
+            "18",
+            None,
+            "Explain the output fields",
+            "Added an expected output example",
+        ),
+        (
+            "review",
+            "19",
+            None,
+            "Try the import on a larger fixture",
+            "All valid rows imported",
+        ),
+        (
+            "tests",
+            "20",
+            None,
+            "Check the final regression suite",
+            "Import fixtures all pass",
+        ),
+        (
+            "review",
+            "21",
+            None,
+            "Summarize import changes",
+            "Prepared the release notes",
+        ),
     ]
-    for index, (thread, turn, parent, prompt, summary) in enumerate(samples):
+    archived = [
+        ("archive", f"archive-{i:02}", None, f"Review archived import case {i:02}", "Recorded the import result")
+        for i in range(60)
+    ]
+    for index, (thread, turn, parent, prompt, summary) in enumerate(archived + samples):
         parent_thread, parent_turn = parent or (None, None)
         api.request(
             "turns",
@@ -80,13 +176,145 @@ def seed(api):
             },
         )
     for note in (
+        *(
+            {
+                "id": f"fixture-archive-note-{i:02}",
+                "thread": "archive",
+                "turn": f"archive-{i:02}",
+                "body": f"# Archived case {i:02}\n\nKeep the expected output with the example.",
+            }
+            for i in range(0, 60, 10)
+        ),
+        *(
+            {
+                "id": f"fixture-archived-project-note-{i:02}",
+                "body": f"# Archived project note {i:02}\n\nRetain the corresponding sample result.",
+            }
+            for i in range(60)
+        ),
         {
             "id": "fixture-turn-note",
             "thread": "review",
             "turn": "02",
-            "body": "Check blank lines too.",
+            "body": "# Blank input\n\nCheck blank lines too.",
+            "priority": "highlighted",
         },
+        {
+            "id": "fixture-turn-note-quoted",
+            "thread": "review",
+            "turn": "10",
+            "body": "# Quoted field\n\nKeep a delimiter inside a quoted field.",
+            "priority": "low",
+        },
+        *(
+            {
+                "id": f"fixture-turn-note-{index}",
+                "thread": thread,
+                "turn": turn,
+                "body": f"# {title}\n\n{body}",
+            }
+            for index, (thread, turn, title, body) in enumerate(
+                (
+                    (
+                        "review",
+                        "01",
+                        "Sample input",
+                        "Use a small synthetic input file.",
+                    ),
+                    (
+                        "tests",
+                        "03",
+                        "Empty input fixture",
+                        "An empty file is a supported input.",
+                    ),
+                    ("docs", "05", "Setup command", "Copy the command from the guide."),
+                    (
+                        "review",
+                        "06",
+                        "Rejection message",
+                        "Include an actionable reason.",
+                    ),
+                    ("tests", "07", "Blank lines", "Include repeated blank lines."),
+                    (
+                        "review",
+                        "08",
+                        "Mixed line endings",
+                        "Test both newline styles in one file.",
+                    ),
+                    (
+                        "docs",
+                        "09",
+                        "Input delimiter",
+                        "Give a short example in the guide.",
+                    ),
+                    (
+                        "tests",
+                        "11",
+                        "Escaped quotes",
+                        "Include a field with an escaped quote.",
+                    ),
+                    (
+                        "review",
+                        "13",
+                        "Header uniqueness",
+                        "Check the reported header name.",
+                    ),
+                    ("docs", "15", "Copyable quickstart", "Keep the path relative."),
+                    (
+                        "review",
+                        "16",
+                        "한글 샘플",
+                        "Include a decomposed and a composed example.",
+                    ),
+                    (
+                        "tests",
+                        "17",
+                        "Unicode stored exactly",
+                        "Compare the bytes after import.",
+                    ),
+                    (
+                        "review",
+                        "19",
+                        "Larger fixture",
+                        "Use generated rows to measure the import.",
+                    ),
+                    ("review", "19", "Baseline run", "Compare the final row count."),
+                    ("review", "21", "Release note", "Mention the error messages."),
+                    (
+                        "review",
+                        "21",
+                        "Regression coverage",
+                        "Link the synthetic fixtures.",
+                    ),
+                )
+            )
+        ),
         {"id": "fixture-project-note", "body": "Keep the import examples short."},
+        *(
+            {
+                "id": f"fixture-project-note-{index}",
+                "body": f"# {title}\n\n{body}",
+                "priority": {"Unicode samples": "highlighted", "Blank records": "low"}.get(title, "normal"),
+            }
+            for index, (title, body) in enumerate(
+                (
+                    ("Example data", "Use generated inputs in the guide."),
+                    ("Input delimiter", "Document comma-separated input."),
+                    ("Filename examples", "Use portable relative paths."),
+                    ("Expected output", "Show two successful rows."),
+                    ("Error messages", "Include the rejected row and a reason."),
+                    ("Blank records", "Define which blank rows are skipped."),
+                    ("Escaping", "Show a value with quotes."),
+                    ("Duplicate headers", "Require unique column names."),
+                    ("Line endings", "Support the common line ending conventions."),
+                    ("Unicode samples", "Keep 한글 and accented text in the fixtures."),
+                    ("Quickstart", "Use a single copyable command."),
+                    ("Regression cases", "Keep examples with the test suite."),
+                    ("Release checklist", "Check imports and the guide together."),
+                    ("Follow-up", "Review how rejected rows are reported."),
+                )
+            )
+        ),
     ):
         api.request("notes", {"project": FIXTURE, **note})
 

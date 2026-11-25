@@ -9,7 +9,6 @@ import re
 import subprocess
 import sys
 import tarfile
-import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
@@ -17,8 +16,9 @@ from unittest.mock import patch
 from mcp import Client, StdioServerParameters
 
 from agent_journal.common import Api
-from tests.smoke_local import child
+from tests.processes import child, cleanup_on_termination, startup_line
 from tests.test_local_stack import CodexFixture, turn
+from tests.workspace import test_workspace
 
 PROJECT = "example/journal-compatibility"
 THREAD = "fixture-session"
@@ -89,7 +89,7 @@ def exchange(folder, client, server, server_tag=None):
         deployment.write_text(f"{server_tag}-{commit[:12]}\n", encoding="utf-8")
         command += ["--deployment-id-file", deployment]
     with child(command, env=env, stdout=subprocess.PIPE, text=True) as process:
-        line = process.stdout.readline()
+        line = startup_line(process)
         prefix = "Journal listening on "
         if not line.startswith(prefix):
             raise RuntimeError("The compatibility server did not start")
@@ -129,12 +129,48 @@ def exchange(folder, client, server, server_tag=None):
                 raise RuntimeError("The server did not store the client's transcript")
             asyncio.run(read_and_write(client, env, folder))
         finally:
-            fixture.server.shutdown()
+            fixture.close()
+
+
+def migrate_snapshot(folder, previous, candidate):
+    state = folder / "new-client" / "journal"
+    snapshot = folder / "database-copy.sqlite3"
+    env = os.environ | {
+        "AGENT_JOURNAL_HOME": str(state), "AGENT_JOURNAL_TOKEN": "migration-fixture",
+    }
+    subprocess.run(
+        [previous, "backup", "--database", state / "server.sqlite3", "--output", snapshot],
+        env=env, check=True, stdout=subprocess.DEVNULL,
+    )
+    with child([candidate, "serve", "--port", "0", "--database", snapshot],
+               env=env, stdout=subprocess.PIPE, text=True) as process:
+        prefix = "Journal listening on "
+        line = startup_line(process)
+        if not line.startswith(prefix):
+            raise RuntimeError("The candidate did not start with the legacy snapshot")
+        _, port = ast.literal_eval(line.removeprefix(prefix).strip())
+        with patch.dict(os.environ, {"AGENT_JOURNAL_HOME": str(state)}):
+            api = Api(f"http://127.0.0.1:{port}", env["AGENT_JOURNAL_TOKEN"])
+        board = api.request("board", project=PROJECT)
+        if [turn["turn"] for turn in board["turns"]] != [TURN]:
+            raise RuntimeError("Journey was not preserved in the migrated snapshot")
+        note = api.request("note", project=PROJECT, id="fixture-note")
+        if (note["title"], note["body"], note["thread"], note["turn"]) != ("Untitled note", NOTE, THREAD, TURN):
+            raise RuntimeError("The legacy note was not preserved in the migrated snapshot")
+        if note["priority"] != "normal":
+            raise RuntimeError("A migrated note should start with Normal status")
+        stats = api.request("stats", project=PROJECT)
+        if stats["projects"][0]["note_count"] != 1:
+            raise RuntimeError("Storage statistics missed the migrated note")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exclude", help="candidate tag to skip during a release")
+    parser.add_argument(
+        "--database-migrations", action="store_true",
+        help="also boot the candidate with a snapshot from each earlier server",
+    )
     args = parser.parse_args()
     major = version("agent-journal").split(".")[0]
     tags = [
@@ -145,14 +181,16 @@ def main():
         print(f"No earlier stable tags in major {major}.")
         return
     candidate = Path(sys.executable).with_name("agent-journal")
-    with tempfile.TemporaryDirectory(prefix="aj-compat-", dir="/tmp") as temporary:
-        root = Path(temporary)
+    with cleanup_on_termination(), test_workspace("aj-compat-") as root:
         for tag in tags:
             folder = root / tag
             previous = install_tag(tag, folder)
             exchange(folder / "new-client", candidate, previous, server_tag=tag)
             exchange(folder / "old-client", previous, candidate)
             print(f"Client/server compatibility verified in both directions with {tag}.")
+            if args.database_migrations:
+                migrate_snapshot(folder, previous, candidate)
+                print(f"Database snapshot migration verified with {tag}.")
 
 
 if __name__ == "__main__":

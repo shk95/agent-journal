@@ -107,13 +107,27 @@ jobs:
           import subprocess
           import tomllib
           with open("pyproject.toml", "rb") as source:
-              version = tomllib.load(source)["project"]["version"]
+              project = tomllib.load(source)
+          version = project["project"]["version"]
           tag = os.environ["RELEASE_TAG"]
           if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) or tag != "v" + version:
               raise SystemExit("The tag must match the version in pyproject.toml")
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          sources = project["tool"]["agent-journal"]["upgrade-from"]
+          stable = r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+          def parse_version(value):
+              match = re.fullmatch(stable, value)
+              if not match:
+                  raise SystemExit("Use stable tags for database upgrade source ranges")
+              return tuple(map(int, match.groups()))
+          if any(
+              set(bounds) != {"minimum", "maximum"}
+              or not parse_version(bounds["minimum"]) <= parse_version(bounds["maximum"]) <= parse_version(tag)
+              for bounds in sources
+          ):
+              raise SystemExit("Invalid database upgrade source ranges")
           with open("server-release.json", "w") as output:
-              json.dump({"tag": tag, "commit": commit}, output)
+              json.dump({"tag": tag, "commit": commit, "upgrade_from": sources}, output)
           PY
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
