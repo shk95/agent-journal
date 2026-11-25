@@ -4,7 +4,7 @@
 
 ### Nix client
 
-Install the client CLI on a work machine with flakes enabled.
+The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (`x86_64-linux`), and Linux ARM64 (`aarch64-linux`). Enable flakes on the work machine before installing.
 
 ```sh
 nix profile add 'github:shk95/agent-journal#client'
