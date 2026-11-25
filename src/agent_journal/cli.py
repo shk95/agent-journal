@@ -40,6 +40,15 @@ def connect(url=None):
     return api, projects
 
 
+def client_connection():
+    try:
+        return Api(), None
+    except ConnectionRequired:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise
+        return connect()
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="agent-journal",
@@ -104,13 +113,8 @@ def main():
             from .tui import run
 
             project = current(args.project)
-            try:
-                api = Api()
-            except ConnectionRequired:
-                if not (sys.stdin.isatty() and sys.stdout.isatty()):
-                    raise
-                api, projects = connect()
-            else:
+            api, projects = client_connection()
+            if projects is None:
                 projects = api.request("projects")
             if not any(row["project"] == project for row in projects):
                 raise ValueError(
@@ -126,7 +130,9 @@ def main():
                 socket=args.socket,
             ).run()
             return
-        api = Api()
+        api, projects = (
+            (Api(), None) if args.command == "observe" else client_connection()
+        )
         if args.command == "web":
             import webbrowser
             from urllib.parse import quote
@@ -138,7 +144,9 @@ def main():
             webbrowser.open_new_tab(url)
             return
         if args.command == "projects":
-            for row in api.request("projects"):
+            if projects is None:
+                projects = api.request("projects")
+            for row in projects:
                 print(row["project"], "active" if row["active"] else "disabled")
         elif args.command == "observe":
             from .observer import Cache, observe

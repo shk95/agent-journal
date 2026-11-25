@@ -13,8 +13,12 @@ from .common import Api, local_repo, repo_key, turn_start
 from .observer import Codex, request_text
 
 Axis = Literal["journey", "turn_notes", "project_notes"]
-INSTRUCTIONS = """Use this journal when the user asks about it. Call register_project
-only when the user explicitly asks to register a GitHub repository or resume collecting it.
+INSTRUCTIONS = """Use this journal when the user asks about it. Set up the server
+connection before registering or using a project. If setup is required, ask the user
+to run agent-journal connect in a local terminal and enter the server URL and access
+token there. Resume after setup succeeds. Keep the access token in the local terminal.
+Call register_project only when the user explicitly asks to register a GitHub
+repository or resume collecting it.
 Read only the relevant axes.
 Use Journey for a general progress question and name the axes you read in your reply.
 Pass the exact current request to read the journey as it stood before that request.
@@ -91,9 +95,15 @@ def make_mcp(api=None, default_project=None, socket=None):
             raise ToolError("Specify a GitHub project as OWNER/REPO")
         return key
 
+    def list_projects(journal):
+        try:
+            return journal.request("projects")
+        except (OSError, RuntimeError) as error:
+            raise ToolError(str(error)) from None
+
     def resolve(journal, project):
         key = project_key(project)
-        if not any(row["project"] == key for row in journal.request("projects")):
+        if not any(row["project"] == key for row in list_projects(journal)):
             raise ToolError(
                 "This GitHub project is not registered. Register it only after the user explicitly asks."
             )
@@ -102,7 +112,7 @@ def make_mcp(api=None, default_project=None, socket=None):
     @server.tool(annotations=read_only, structured_output=True)
     def journal_projects() -> list[dict[str, Any]]:
         """List registered GitHub projects and their collection state."""
-        return connection().request("projects")
+        return list_projects(connection())
 
     @server.tool(
         annotations=ToolAnnotations(
@@ -120,8 +130,9 @@ def make_mcp(api=None, default_project=None, socket=None):
         Verification uses the local GitHub CLI credentials. Re-registering an
         active project keeps its collection start time.
         """
-        key = project_key(project)
         journal = connection()
+        list_projects(journal)
+        key = project_key(project)
         try:
             result = subprocess.run(
                 [

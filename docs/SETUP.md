@@ -37,11 +37,13 @@ The default address is `http://127.0.0.1:8765`. For cloud use, keep the database
 
 ## Connect a work machine
 
-Run `agent-journal` inside a GitHub checkout. On the first interactive run, enter the journal server URL and access token. The client checks the connection and saves the settings in `~/.agent-journal/connection.json`. You can also run the setup explicitly from any directory.
+Set up the server connection once per work machine, before registering or using a journal project. From a GitHub checkout, run `agent-journal` to open the terminal client, or run `agent-journal web` to open the web journal. On the first interactive run, the client prompts for the server URL and access token. It verifies the connection and saves the settings in `~/.agent-journal/connection.json`. You can also run the setup explicitly from any directory.
 
 ```sh
-agent-journal connect --url https://journal.example.com
+agent-journal connect
 ```
+
+If you start from Codex, the first journal tool call prompts you to run this command when setup is required. Enter the server URL and access token in your local terminal, then retry the request in Codex.
 
 The TUI, local MCP tools, and observer use the same saved connection on each work machine. The `AGENT_JOURNAL_HOME` environment variable selects a different state directory. For service managers and temporary tests, `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` override saved settings.
 
@@ -91,7 +93,7 @@ Add the local MCP interface to your user-level Codex configuration once per work
 codex mcp add journal -- agent-journal mcp
 ```
 
-From the GitHub checkout, ask Codex to register this repository with Agent Journal. Its `register_project` tool uses the signed-in GitHub CLI to verify the repository and marks it active on the journal server. If the checkout is ambiguous, give Codex the GitHub `OWNER/REPO`. You can ask Codex to register the same project again to resume collection after disabling it.
+After connecting the machine, ask Codex to register the repository from its checkout. Its `register_project` tool verifies the journal connection, checks the repository using the signed-in GitHub CLI, and marks it active on the journal server. If the checkout is ambiguous, give Codex the GitHub `OWNER/REPO`. You can ask Codex to register the same project again to resume collection after disabling it.
 
 Ask Codex to name the axes it reads. For example, ask it to read Journey and then add a note to the previous result from this session. The tool locally resolves the current request and returns the preceding turns with their IDs. If two concurrent requests have identical text, specify the target session and turn.
 

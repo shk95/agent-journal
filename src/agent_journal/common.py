@@ -109,7 +109,8 @@ class Api:
             raise ValueError("Use HTTPS for a remote journal server")
         if not self.token:
             raise ConnectionRequired(
-                "Run agent-journal connect to set up the journal connection on this machine"
+                "Run agent-journal connect in a local terminal first. "
+                "Enter the server URL and access token there, then retry."
             )
 
     def save(self):

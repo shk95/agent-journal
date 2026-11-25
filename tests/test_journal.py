@@ -116,6 +116,31 @@ class TestJournal(unittest.TestCase):
                 open_tab.assert_called_once_with(url)
                 print_url.assert_called_once_with(url, flush=True)
 
+    def test_first_web_run_connects_before_opening_the_browser(self):
+        saved = self.path / "connection.json"
+        with (
+            patch.object(sys, "argv", ["agent-journal", "web"]),
+            patch.dict(
+                os.environ, {"AGENT_JOURNAL_URL": "", "AGENT_JOURNAL_TOKEN": ""}
+            ),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys.stdout, "isatty", return_value=True),
+            patch("builtins.input", return_value=self.api.base) as url_prompt,
+            patch("getpass.getpass", side_effect=["wrong-token", self.api.token]),
+            patch("builtins.print"),
+            patch("webbrowser.open_new_tab") as open_tab,
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+            self.assertFalse(saved.exists())
+            open_tab.assert_not_called()
+            main()
+            self.assertTrue(saved.exists())
+            open_tab.assert_called_once_with(self.api.base + "/")
+            main()
+            self.assertEqual(open_tab.call_count, 2)
+            self.assertEqual(url_prompt.call_count, 2)
+
     def test_tui_command_can_disable_mouse(self):
         with (
             patch.object(
@@ -408,6 +433,7 @@ class TestJournal(unittest.TestCase):
             params = StdioServerParameters(
                 command=str(Path(sys.executable).with_name("agent-journal")),
                 args=["mcp"],
+                cwd=self.path,
                 env=dict(os.environ)
                 | {"AGENT_JOURNAL_TOKEN": "", "AGENT_JOURNAL_URL": ""},
             )
@@ -417,6 +443,9 @@ class TestJournal(unittest.TestCase):
                     [tool.name for tool in (await client.list_tools()).tools],
                 )
                 result = await client.call_tool("journal_projects", {})
+                self.assertTrue(result.is_error)
+                self.assertIn("agent-journal connect", result.content[0].text)
+                result = await client.call_tool("register_project", {})
                 self.assertTrue(result.is_error)
                 self.assertIn("agent-journal connect", result.content[0].text)
                 self.api.save()
@@ -437,6 +466,14 @@ class TestJournal(unittest.TestCase):
                     side_effect=[success, success, failure],
                 ) as gh,
             ):
+                rejected_journal = Api(self.api.base, "wrong-token")
+                async with Client(
+                    make_mcp(rejected_journal), raise_exceptions=False
+                ) as client:
+                    result = await client.call_tool("register_project", {})
+                    self.assertTrue(result.is_error)
+                    self.assertIn("HTTP 401", result.content[0].text)
+                    gh.assert_not_called()
                 async with Client(make_mcp(self.api), raise_exceptions=False) as client:
                     for attempt in range(2):
                         result = await client.call_tool("register_project", {})
