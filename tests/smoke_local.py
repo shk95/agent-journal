@@ -438,6 +438,17 @@ def check_clients(path, repo, cli, env, api, channel):
                 cells.filter(has_text="Add an empty-input test").get_by_text(
                     "Fork of review", exact=True
                 ).wait_for()
+                stats = subprocess.check_output([cli, "stats"], env=env, text=True)
+                if not all(label in stats for label in ("Database", "Last 30 days", PROJECT)):
+                    raise RuntimeError("The CLI did not show the server's storage statistics")
+                page.get_by_role("link", name="Storage", exact=True).click()
+                page.get_by_text("Database file", exact=True).wait_for()
+                projects = page.get_by_role("table", name="Storage by project")
+                projects.get_by_role("link", name=PROJECT, exact=True).click()
+                page.get_by_role("heading", name=PROJECT, exact=True).wait_for()
+                largest = page.get_by_role("table", name="Largest turns")
+                largest.get_by_role("button", name=SUMMARY, exact=True).click()
+                page.get_by_role("dialog").get_by_text(ANSWER, exact=True).wait_for()
                 if errors:
                     raise RuntimeError(f"Browser errors: {errors}")
             finally:

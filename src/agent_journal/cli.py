@@ -4,10 +4,18 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
-from .common import Api, ConnectionRequired, local_repo, repo_key, state_dir
+from .common import (
+    Api,
+    ConnectionRequired,
+    JournalHTTPError,
+    local_repo,
+    repo_key,
+    state_dir,
+)
 
 
 def current(explicit):
@@ -50,6 +58,51 @@ def client_connection():
         return connect()
 
 
+def format_bytes(size):
+    for scale, unit in ((10**12, "TB"), (10**9, "GB"), (10**6, "MB"), (10**3, "KB")):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}"
+    return f"{size:,} B"
+
+
+def show_stats(api):
+    try:
+        data = api.request("stats")
+    except JournalHTTPError as error:
+        if error.status in (400, 404):
+            raise RuntimeError(
+                "Storage statistics are unavailable on this Journal server."
+            ) from None
+        raise
+    print(f"Database  {format_bytes(data['database_bytes'])}")
+    print(f"WAL       {format_bytes(data['wal_bytes'])}")
+    recent = data["recent"]
+    print(
+        f"Last {recent['days']} days  {recent['turn_count']:,} turns"
+        f"  {format_bytes(recent['turn_bytes'])}"
+    )
+    print()
+    if not data["projects"]:
+        print("No registered projects.")
+        return
+    width = max(len("Project"), max(len(row["project"]) for row in data["projects"]))
+    print(
+        f"{'Project':<{width}}  {'Turns':>8}  {'Notes':>8}"
+        f"  {'Record data':>11}  Latest turn (UTC)"
+    )
+    for row in data["projects"]:
+        latest = "–"
+        if row["latest_turn_started"] is not None:
+            latest = datetime.fromtimestamp(
+                row["latest_turn_started"], timezone.utc
+            ).strftime("%Y-%m-%d %H:%M")
+        size = format_bytes(row["turn_bytes"] + row["note_bytes"])
+        print(
+            f"{row['project']:<{width}}  {row['turn_count']:>8,}  {row['note_count']:>8,}"
+            f"  {size:>11}  {latest}"
+        )
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="agent-journal",
@@ -75,6 +128,9 @@ def main():
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
     commands.add_parser("projects")
+    commands.add_parser(
+        "stats", help="show storage statistics for the connected Journal server"
+    )
     commands.add_parser("server-version", help="show the connected Journal server version")
     commands.add_parser("setup-codex", help="install global Codex tools and recording hooks")
     commands.add_parser("codex-hook")
@@ -163,6 +219,8 @@ def main():
             return
         if args.command == "server-version":
             print(api.server_version() or "unknown")
+        elif args.command == "stats":
+            show_stats(api)
         elif args.command == "projects":
             if projects is None:
                 projects = api.request("projects")

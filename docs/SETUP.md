@@ -93,6 +93,10 @@ Use `agent-journal projects` to see the registration state. Use `agent-journal d
 
 Run `agent-journal server-version` to print the connected server's version. Older servers may report their release through the deployment ID. If they provide neither version nor release ID, the command prints `unknown`. Use `agent-journal --version` for the local client.
 
+Run `agent-journal stats` or open **Storage** in the web journal to see the active database and WAL file sizes, the data in turns started during the last 30 days, and counts and sizes by project. In the web journal, select a project in the storage table to see its ten largest turns and open their transcripts.
+
+Project sizes count transcript JSON, stored prompts and summaries, and note text in bytes. The file sizes also include SQLite overhead and reusable pages. They exclude deployment snapshots and separate backups.
+
 ## Collection and summaries
 
 The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The observer recovers subsecond start times from Codex turn IDs when available. Older records with second-only timestamps have a conservative cutoff. Turning collection back on sets a fresh cutoff.

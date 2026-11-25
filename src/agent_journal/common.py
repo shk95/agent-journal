@@ -81,6 +81,12 @@ class ConnectionRequired(ValueError):
     pass
 
 
+class JournalHTTPError(RuntimeError):
+    def __init__(self, status, body):
+        super().__init__(f"Journal HTTP {status}: {body}")
+        self.status = status
+
+
 class Api:
     def __init__(self, base=None, token=None):
         path = state_dir() / "connection.json"
@@ -163,6 +169,6 @@ class Api:
             with HTTP.open(req, timeout=8) as r:
                 return json.load(r)
         except HTTPError as err:
-            raise RuntimeError(
-                f"Journal HTTP {err.code}: {err.read(400).decode(errors='replace')}"
+            raise JournalHTTPError(
+                err.code, err.read(400).decode(errors="replace")
             ) from err

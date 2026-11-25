@@ -89,6 +89,10 @@ nav a,
 a {
   color: var(--green);
 }
+#crumb {
+  display: flex;
+  gap: 14px;
+}
 #axes {
   display: flex;
   gap: 8px;
@@ -113,6 +117,51 @@ input[type="checkbox"] {
 }
 .project p {
   margin: 4px 0;
+}
+.storage-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px 24px;
+  background: #ecefe7;
+  border: 1px solid var(--line);
+  padding: 16px;
+  margin: 0;
+}
+.storage-totals dt {
+  font-size: 14px;
+  color: var(--muted);
+}
+.storage-totals dd {
+  margin: 4px 0 0;
+  font-size: 22px;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+}
+.storage-section {
+  margin-top: 26px;
+}
+.storage-scroll {
+  overflow: auto;
+}
+.storage-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.storage-table :is(th, td) {
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.storage-table th {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.storage-table button {
+  text-align: start;
+  min-width: 8em;
+  overflow-wrap: anywhere;
 }
 .board {
   --lane-step: 18px;

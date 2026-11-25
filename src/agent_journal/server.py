@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS notes(
 """
 STATIC = Path(__file__).parent / "static"
 SERVER_VERSION = version("agent-journal")
+STORAGE_WINDOW_DAYS = 30
 
 
 def connect(path):
@@ -116,14 +117,80 @@ def overview(db):
     return projects
 
 
+def storage_stats(db, project=None):
+    db.execute("BEGIN")
+    now = time.time()
+    cutoff = now - STORAGE_WINDOW_DAYS * 86400
+    where = "WHERE project=?" if project else ""
+    scope = (project,) if project else ()
+    projects = listing(
+        db,
+        f"""WITH turn_totals AS (
+                SELECT project, COUNT(*) AS turn_count, SUM(body_bytes) AS turn_bytes,
+                       MAX(started) AS latest_turn_started,
+                       COUNT(*) FILTER (WHERE started BETWEEN ? AND ?) AS recent_count,
+                       SUM(body_bytes) FILTER (WHERE started BETWEEN ? AND ?) AS recent_bytes
+                FROM turns INDEXED BY turn_storage {where} GROUP BY project
+            ), note_totals AS (
+                SELECT project, COUNT(*) AS note_count, SUM(body_bytes) AS note_bytes
+                FROM notes INDEXED BY note_storage {where} GROUP BY project
+            )
+            SELECT project, COALESCE(turn_count, 0) AS turn_count,
+                   COALESCE(turn_bytes, 0) AS turn_bytes, latest_turn_started,
+                   COALESCE(note_count, 0) AS note_count,
+                   COALESCE(note_bytes, 0) AS note_bytes,
+                   COALESCE(recent_count, 0) AS recent_count,
+                   COALESCE(recent_bytes, 0) AS recent_bytes
+            FROM projects LEFT JOIN turn_totals USING (project)
+                          LEFT JOIN note_totals USING (project)
+            {where} ORDER BY project""",
+        (cutoff, now, cutoff, now, *scope, *scope, *scope),
+    )
+    if project and not projects:
+        raise KeyError("Project not found")
+    largest = listing(
+        db,
+        f"""WITH largest AS (
+                SELECT project, thread, turn, started, body_bytes
+                FROM turns INDEXED BY turn_storage {where}
+                ORDER BY body_bytes DESC, started DESC, project, thread, turn LIMIT 10
+            )
+            SELECT largest.*, substr(turns.summary, 1, 160) AS summary
+            FROM largest JOIN turns USING (project, thread, turn)
+            ORDER BY largest.body_bytes DESC, largest.started DESC,
+                     largest.project, largest.thread, largest.turn""",
+        scope,
+    )
+    recent = {
+        "days": STORAGE_WINDOW_DAYS,
+        "turn_count": sum(row.pop("recent_count") for row in projects),
+        "turn_bytes": sum(row.pop("recent_bytes") for row in projects),
+    }
+    result = {"recent": recent, "projects": projects, "largest_turns": largest}
+    if not project:
+        path = db.execute("PRAGMA database_list").fetchone()["file"]
+        result.update(database_bytes=0, wal_bytes=0)
+        if path:
+            result["database_bytes"] = Path(path).stat().st_size
+            try:
+                result["wal_bytes"] = Path(path + "-wal").stat().st_size
+            except FileNotFoundError:
+                pass
+    return result
+
+
 def endpoint(db, method, path, args):
     if method == "GET" and path == "projects":
         return listing(db, "SELECT * FROM projects ORDER BY project")
     if method == "GET" and path == "overview":
         return overview(db)
+    if method == "GET" and path == "stats" and "project" not in args:
+        return storage_stats(db)
     project = args.get("project", "")
     if not isinstance(project, str) or not PROJECT.fullmatch(project):
         raise ValueError("Invalid project")
+    if method == "GET" and path == "stats":
+        return storage_stats(db, project)
     if method == "POST" and path == "register":
         db.execute(
             """INSERT INTO projects VALUES(?,?,1) ON CONFLICT(project) DO UPDATE
@@ -159,7 +226,8 @@ def endpoint(db, method, path, args):
             raise KeyError("Turn not found")
         return json.loads(row["items"])
     if path == "notes" and method == "GET":
-        sql, values = "SELECT * FROM notes WHERE project=?", [project]
+        sql = "SELECT id,project,thread,turn,body,created,version FROM notes WHERE project=?"
+        values = [project]
         axis = args.get("axis")
         if axis == "project":
             sql += " AND turn IS NULL"
@@ -389,14 +457,26 @@ def make_server(
                 ("turns", "updated", "REAL"),
                 ("turns", "parent_turn", "TEXT"),
                 ("notes", "version", "INTEGER NOT NULL DEFAULT 1"),
+                (
+                    "turns",
+                    "body_bytes",
+                    "INTEGER AS (length(CAST(items AS BLOB)) + length(CAST(prompt AS BLOB))"
+                    " + length(CAST(summary AS BLOB))) VIRTUAL",
+                ),
+                ("notes", "body_bytes", "INTEGER AS (length(CAST(body AS BLOB))) VIRTUAL"),
             ):
                 if field not in {
-                    row["name"] for row in db.execute(f"PRAGMA table_info({table})")
+                    row["name"] for row in db.execute(f"PRAGMA table_xinfo({table})")
                 }:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {field} {definition}")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS active_turns ON turns(project,updated) WHERE status='inProgress'"
             )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS turn_storage "
+                "ON turns(project, body_bytes DESC, started DESC, thread, turn)"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS note_storage ON notes(project, body_bytes)")
     server = ThreadingHTTPServer((host, port), JournalHandler)
     server.token, server.database = token, database
     server.browser_cookie = "journal"

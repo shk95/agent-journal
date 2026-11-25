@@ -7,8 +7,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
+from time import time
 from unittest.mock import patch
 from urllib.request import urlopen
 from uuid import UUID
@@ -17,10 +19,10 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 from agent_journal.cli import main
-from agent_journal.common import OBSERVATION_LEASE, Api, repo_key
+from agent_journal.common import OBSERVATION_LEASE, Api, JournalHTTPError, repo_key
 from agent_journal.mcp_server import make_mcp
 from agent_journal.observer import Cache, scan
-from agent_journal.server import make_server
+from agent_journal.server import SCHEMA, connect, endpoint, make_server
 from agent_journal.summary import work_once
 
 
@@ -113,6 +115,124 @@ class TestJournal(unittest.TestCase):
         ):
             main()
         output.assert_called_once_with(version("agent-journal"))
+
+    def test_storage_stats_sizes_window_and_project_scope(self):
+        now = int(time())
+        old = now - 31 * 86400
+        with closing(connect(self.server.database)) as db, db:
+            db.execute("UPDATE projects SET since=? WHERE project='test/p'", (old,))
+        self.api.request("register", {"project": "test/empty"})
+        records = []
+        for i in range(11):
+            body = "예제" * (25 if i == 0 else i)
+            record = {
+                "project": "test/p",
+                "thread": "synthetic",
+                "turn": f"fixture-{i}",
+                "started": old if i == 0 else now - i,
+                "status": "completed",
+                "prompt": body,
+                "items": [{"type": "agentMessage", "text": body}],
+                "summary": "Checked the fixture",
+                "revision": 1,
+            }
+            self.assertTrue(self.api.request("turns", record)["accepted"])
+            records.append(record)
+        updated = records[-1] | {"summary": "Updated fixture", "revision": 2}
+        self.api.request("turns", updated)
+        self.api.request("turns", records[-1] | {"summary": "Stale " * 30})
+        records[-1] = updated
+
+        def body_size(record):
+            text = (
+                json.dumps(record["items"], ensure_ascii=False)
+                + record["prompt"]
+                + record["summary"]
+            )
+            return len(text.encode())
+
+        note = {"project": "test/p", "id": "fixture-note", "body": "메모"}
+        self.api.request("notes", note)
+        self.api.request("edit-note", note | {"body": "새 메모", "version": 1})
+        self.api.request("disable", {"project": "test/p"})
+        data = self.api.request("stats")
+        self.assertGreater(data["database_bytes"], 0)
+        self.assertGreaterEqual(data["wal_bytes"], 0)
+        self.assertEqual(
+            data["recent"],
+            {
+                "days": 30,
+                "turn_count": 10,
+                "turn_bytes": sum(map(body_size, records[1:])),
+            },
+        )
+        empty_project, project = data["projects"]
+        self.assertEqual(empty_project["project"], "test/empty")
+        self.assertIsNone(empty_project["latest_turn_started"])
+        self.assertEqual(empty_project["turn_bytes"] + empty_project["note_bytes"], 0)
+        self.assertEqual(
+            project,
+            {
+                "project": "test/p",
+                "turn_count": 11,
+                "turn_bytes": sum(map(body_size, records)),
+                "note_count": 1,
+                "note_bytes": len("새 메모".encode()),
+                "latest_turn_started": now - 1,
+            },
+        )
+        largest = data["largest_turns"]
+        self.assertEqual(
+            [row["body_bytes"] for row in largest],
+            sorted(map(body_size, records), reverse=True)[:10],
+        )
+        self.assertEqual(largest[0]["turn"], records[0]["turn"])
+        scoped = self.api.request("stats", project="test/p")
+        self.assertEqual(scoped["projects"], data["projects"][1:])
+        self.assertEqual(scoped["largest_turns"], largest)
+        empty = self.api.request("stats", project="test/empty")
+        self.assertEqual(empty["largest_turns"], [])
+        self.assertEqual(empty["recent"]["turn_count"], 0)
+        with self.assertRaisesRegex(JournalHTTPError, "404.*Project not found"):
+            self.api.request("stats", project="test/missing")
+        with self.assertRaisesRegex(JournalHTTPError, "401.*Authentication required"):
+            Api(self.api.base, "wrong-token").request("stats")
+
+    def test_storage_stats_indexes_existing_records(self):
+        path = self.path / "legacy"
+        with closing(connect(path)) as db, db:
+            db.executescript(SCHEMA)
+            db.execute("INSERT INTO projects VALUES ('test/legacy', 0, 1)")
+            db.execute(
+                """INSERT INTO turns VALUES
+                   ('test/legacy', 'thread', 'turn', 1, 'completed', 'a', 'b', NULL, '[]', 1)"""
+            )
+            db.execute("INSERT INTO notes VALUES ('note', 'test/legacy', NULL, NULL, 'abc', 1)")
+        for _ in range(2):
+            with (
+                make_server("127.0.0.1", 0, path, "test-token"),
+                closing(connect(path)) as db,
+                db,
+            ):
+                data = endpoint(db, "GET", "stats", {})
+                self.assertEqual(data["projects"][0]["turn_bytes"], 4)
+                self.assertEqual(data["projects"][0]["note_bytes"], 3)
+                self.assertEqual(data["largest_turns"][0]["turn"], "turn")
+                notes = endpoint(db, "GET", "notes", {"project": "test/legacy"})
+                self.assertNotIn("body_bytes", notes[0])
+
+    def test_stats_command_reports_an_older_server(self):
+        with (
+            patch.object(sys, "argv", ["agent-journal", "stats"]),
+            patch.object(Api, "request", side_effect=JournalHTTPError(400, "Invalid project")),
+            patch("builtins.print") as output,
+            self.assertRaises(SystemExit) as error,
+        ):
+            main()
+        self.assertEqual(error.exception.code, 1)
+        output.assert_called_once_with(
+            "Storage statistics are unavailable on this Journal server.", file=sys.stderr
+        )
 
     def test_web_command_opens_configured_journal(self):
         for options, fragment in (

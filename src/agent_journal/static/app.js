@@ -152,6 +152,95 @@ function overview(entries) {
   return out;
 }
 
+function storageLink(project) {
+  const link = node("a", project || "Storage");
+  link.href = project ? "#stats?" + new URLSearchParams({ project }) : "#stats";
+  return link;
+}
+function isStorageRoute() {
+  return location.hash === "#stats" || location.hash.startsWith("#stats?");
+}
+function formatBytes(size) {
+  for (const [scale, unit] of [[1e12, "TB"], [1e9, "GB"], [1e6, "MB"], [1e3, "KB"]]) {
+    if (size >= scale) return (size / scale).toFixed(1) + " " + unit;
+  }
+  return size.toLocaleString() + " B";
+}
+function storageTable(title, headers, rows, empty) {
+  const section = node("section", undefined, "storage-section");
+  const heading = node("h2", title);
+  section.append(heading);
+  if (!rows.length) {
+    section.append(node("p", empty, "empty"));
+    return section;
+  }
+  const scroll = node("div", undefined, "storage-scroll");
+  const table = node("table", undefined, "storage-table");
+  table.setAttribute("aria-label", title);
+  const header = table.createTHead().insertRow();
+  for (const label of headers) {
+    const cell = node("th", label);
+    cell.scope = "col";
+    header.append(cell);
+  }
+  const body = table.createTBody();
+  for (const values of rows) {
+    const row = body.insertRow();
+    for (const value of values) row.insertCell().append(value);
+  }
+  scroll.append(table);
+  section.append(scroll);
+  return section;
+}
+function storageView(data, project) {
+  const out = node("div");
+  const totals = node("dl", undefined, "storage-totals");
+  const { recent, projects, largest_turns } = data;
+  const metrics = [
+    [`Turns started in the last ${recent.days} days`, recent.turn_count.toLocaleString()],
+    ["Data in those turns", formatBytes(recent.turn_bytes)],
+  ];
+  if (!project) {
+    metrics.unshift(
+      ["Database file", formatBytes(data.database_bytes)],
+      ["WAL file", formatBytes(data.wal_bytes)],
+    );
+  }
+  for (const [label, value] of metrics) {
+    const metric = node("div");
+    metric.append(node("dt", label), node("dd", value));
+    totals.append(metric);
+  }
+  const date = (started) => started === null ? "–" : new Date(started * 1000).toLocaleString();
+  out.append(
+    totals,
+    storageTable(
+      project ? "Project usage" : "Storage by project",
+      ["Project", "Turns", "Notes", "Record data", "Latest turn"],
+      projects.map((row) => [
+        project ? projectLink(row.project) : storageLink(row.project),
+        row.turn_count.toLocaleString(),
+        row.note_count.toLocaleString(),
+        formatBytes(row.turn_bytes + row.note_bytes),
+        date(row.latest_turn_started),
+      ]),
+      "No registered projects.",
+    ),
+    storageTable(
+      "Largest turns",
+      [...(project ? [] : ["Project"]), "Started", "Record data", "Transcript"],
+      largest_turns.map((row) => [
+        ...(project ? [] : [storageLink(row.project)]),
+        date(row.started),
+        formatBytes(row.body_bytes),
+        action(row.summary || "Open transcript", () => transcript(row.project, row)),
+      ]),
+      "No recorded turns yet.",
+    ),
+  );
+  return out;
+}
+
 const sessionColors = [
   "#26754e",
   "#425da9",
@@ -314,27 +403,43 @@ function board(project, rows, notes) {
 async function refresh() {
   const current = ++version;
   try {
-    const key = decodeURIComponent(location.hash.slice(1));
-    const data = key
-      ? await Promise.all([
-          api("journey", { project: key, limit: pageSize + 1, before, lanes: true }),
-          api("notes", { project: key }),
-        ])
-      : await api("overview");
+    const storage = isStorageRoute();
+    const key = storage
+      ? new URLSearchParams(location.hash.slice("#stats".length)).get("project") || ""
+      : decodeURIComponent(location.hash.slice(1));
+    let data;
+    if (storage) {
+      data = await api("stats", key ? { project: key } : {});
+    } else if (key) {
+      data = await Promise.all([
+        api("journey", { project: key, limit: pageSize + 1, before, lanes: true }),
+        api("notes", { project: key }),
+      ]);
+    } else {
+      data = await api("overview");
+    }
     if (current !== version) return;
     $("login").hidden = true;
     $("view").hidden = false;
     $("connection").textContent = "Connected";
-    const sig = JSON.stringify([key, before, [...visible], data]);
+    const sig = JSON.stringify([storage, key, before, [...visible], data]);
     if (sig === last) return;
     last = sig;
     $("crumb").replaceChildren();
     $("axes").replaceChildren();
-    $("title").textContent = key || "Projects";
-    if (key) {
+    $("title").textContent = key || (storage ? "Storage" : "Projects");
+    if (key || storage) {
       const a = node("a", "All projects");
       a.href = "#";
       $("crumb").append(a);
+    }
+    if (!storage || key) $("crumb").append(storageLink());
+    if (storage) {
+      $("axes").append(action("Refresh", refresh));
+      $("content").replaceChildren(storageView(data, key));
+      return;
+    }
+    if (key) {
       for (const axis of axes) {
         const label = node("label"),
           cb = node("input");
@@ -387,5 +492,6 @@ $("auth").onsubmit = async (e) => {
 window.addEventListener("hashchange", () => { before = ""; refresh(); });
 refresh();
 setInterval(() => {
-  if (!document.hidden && !$("detail").open && $("login").hidden) refresh();
+  if (!document.hidden && !$("detail").open && $("login").hidden && !isStorageRoute())
+    refresh();
 }, 3000);
