@@ -110,7 +110,18 @@ uv run --locked python scripts/dev.py seed
 uv run --locked python scripts/dev.py client tui --project example/journal-fixture
 ```
 
-Open `http://127.0.0.1:8766` in a browser. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command. To observe a real Codex session, use the development client's `register --project OWNER/REPO` and `observe` commands.
+Open `http://127.0.0.1:8766` in a browser. Get its login token with `uv run --locked python scripts/dev.py token`. The development database and token live under the ignored `.local/dev` directory. To use a separate directory, pass the same `--state PATH` to every development command.
+
+To try your normal Codex workflow against the development server, register a GitHub repository and start the observer in a separate pane.
+
+```sh
+uv run --locked python scripts/dev.py client register --project OWNER/REPO
+uv run --locked python scripts/dev.py client observe
+```
+
+Run Codex from that repository as usual. In another pane, open the journal with `uv run --locked python scripts/dev.py client tui --project OWNER/REPO`. The observer uses the local Codex App Server and the signed-in CLI for real summaries.
+
+### Automated checks
 
 ```sh
 uv sync --locked
@@ -118,5 +129,30 @@ uv run --locked python -m unittest discover -s tests -v
 node --check src/agent_journal/static/app.js
 uv build
 ```
+
+### Local Codex and client smoke test
+
+Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. It checks a running turn and its final summary, a Codex MCP note on the previous turn, a TUI note that appears in the browser, and a browser edit that appears in the TUI. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, Git checkout, sockets and a generated journal token.
+
+```sh
+uv run --locked --with playwright==1.65.2 python -m playwright install chromium
+uv run --locked --with playwright==1.65.2 python -m tests.smoke_local
+```
+
+If Chrome is installed, omit the browser installation command and pass `--browser-channel chrome` to the smoke test. Use `--codex PATH` to select a compatible Codex binary.
+
+### Local deployment smoke test
+
+Run the installer and rollback test on a **fresh, disposable Linux VM with systemd**. This is the same test used by the server release workflow. A macOS development machine can run it in a local Linux VM. Use a clean checkout of the revision under test, with Nix and Python 3.11 or newer installed inside that VM.
+
+```sh
+nix build .#server
+sudo python3 scripts/server_deploy.py install
+systemctl is-active agent-journal-update.timer
+sudo systemctl stop agent-journal-update.timer agent-journal-update.service
+sudo python3 -m tests.test_server_deploy smoke
+```
+
+This exercises Linux service startup, SQLite snapshot transfer to the candidate, request fencing, and automatic rollback. The smoke test starts from an empty journal because it installs a synthetic release and deliberately triggers a health failure.
 
 See [the repository instructions](../AGENTS.md) for public file, commit, and privacy rules.

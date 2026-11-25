@@ -159,6 +159,10 @@ def smoke():
 
     with deployment.lock():
         old = deployment.active()["id"]
+        if not old.startswith("bootstrap-") or api("/api/projects"):
+            raise RuntimeError(
+                "Run this smoke test on a fresh, disposable Linux installation"
+            )
         api("/api/register", {"project": "example/fixture"})
         add_note("before-update")
         store = (deployment.slot(old) / "package").resolve()
