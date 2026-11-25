@@ -302,6 +302,7 @@ class JournalHandler(BaseHTTPRequestHandler):
             return self.reply(200, (STATIC / name).read_bytes(), mime)
         token = self.server.token
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        cookie_name = self.server.browser_cookie
         session = hmac.new(
             token.encode(), b"journal-browser-v1", hashlib.sha256
         ).hexdigest()
@@ -310,9 +311,9 @@ class JournalHandler(BaseHTTPRequestHandler):
         authenticated = secrets.compare_digest(
             header.encode(), ("Bearer " + token).encode()
         ) or (
-            "journal" in cookie
+            cookie_name in cookie
             and secrets.compare_digest(
-                cookie["journal"].value.encode(), session.encode()
+                cookie[cookie_name].value.encode(), session.encode()
             )
         )
         if not login and not authenticated:
@@ -342,7 +343,7 @@ class JournalHandler(BaseHTTPRequestHandler):
                 200,
                 {},
                 headers={
-                    "Set-Cookie": f"journal={session}; HttpOnly; SameSite=Strict; Path=/{secure}"
+                    "Set-Cookie": f"{cookie_name}={session}; HttpOnly; SameSite=Strict; Path=/{secure}"
                 },
             )
         args = {k: v[0] for k, v in parse_qs(url.query).items()} | body
@@ -390,5 +391,6 @@ def make_server(
             )
     server = ThreadingHTTPServer((host, port), JournalHandler)
     server.token, server.database = token, database
+    server.browser_cookie = "journal"
     server.deployment_id, server.maintenance_file = deployment_id, maintenance_file
     return server

@@ -110,7 +110,7 @@ just demo
 just demo web
 ```
 
-Each command starts the server from the current checkout on a free loopback port and loads synthetic turns and notes into a temporary database. The default opens the terminal client on the fixture project. The web demo opens the same fixture in your browser. Use the temporary token printed in the terminal to sign in. Press `q` in the TUI or `Ctrl+C` in the terminal to stop the server and discard demo data. The demo uses its own connection settings.
+Each command starts the server from the current checkout on a free loopback port and loads synthetic turns and notes into a temporary database. The default opens the terminal client on the fixture project. The web demo opens the same fixture in your browser. Use the temporary token printed in the terminal to sign in. Press `q` in the TUI or `Ctrl+C` in the terminal to stop the server and discard demo data. Each demo uses its own connection settings and browser sign-in cookie.
 
 ### Persistent development server
 

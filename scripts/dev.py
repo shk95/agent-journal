@@ -76,6 +76,7 @@ def demo(client, port):
     with tempfile.TemporaryDirectory(prefix="agent-journal-demo-") as folder:
         database = Path(folder) / "server.sqlite3"
         with make_server("127.0.0.1", port, database, access) as server:
+            server.browser_cookie = f"journal_demo_{server.server_port}"
             base = f"http://127.0.0.1:{server.server_port}"
             os.environ.update(
                 AGENT_JOURNAL_HOME=folder,
