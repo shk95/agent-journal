@@ -36,13 +36,13 @@ Keep existing endpoint paths, required fields, and response semantics stable wit
 On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Run the [local checks](SETUP.md#local-development) and `just compatibility`. The compatibility check exercises both client/server directions against the stable tags in the same major. Push a tag that matches the candidate version.
 
 ```sh
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The release workflow checks the public history, mixed client/server versions, Nix outputs, and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
-Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.3.0#client' -- tui` runs that release's client.
+Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.4.0#client' -- tui` runs that release's client.
 
 The timer checks every 15 minutes for a stable `vX.Y.Z` release with a server manifest and a version newer than the installed package. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
 

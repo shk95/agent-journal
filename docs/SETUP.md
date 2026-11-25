@@ -18,7 +18,7 @@ Use the standalone GitHub Release installer by default, including when an agent 
 )
 ```
 
-The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.3.0` to the installer to select a specific version. Run the installer again to upgrade.
+The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.4.0` to the installer to select a specific version. Run the installer again to upgrade.
 
 Verify the installed client with `agent-journal --version`. If Codex is on PATH, the installer installs the user-level `journal` MCP entry and recording hooks. Complete [the first server connection](#connect-a-work-machine), then [trust the hooks once in Codex](#set-up-codex).
 
@@ -27,10 +27,10 @@ Verify the installed client with `agent-journal --version`. If Codex is on PATH,
 The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (`x86_64-linux`), and Linux ARM64 (`aarch64-linux`). Enable flakes on the work machine before installing.
 
 ```sh
-nix profile add 'github:shk95/agent-journal/v0.3.0#client'
+nix profile add 'github:shk95/agent-journal/v0.4.0#client'
 ```
 
-Older Nix versions use `nix profile install`. Substitute the desired release tag to pin a different version. To run the client directly, use `nix run 'github:shk95/agent-journal/v0.3.0#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
+Older Nix versions use `nix profile install`. Substitute the desired release tag to pin a different version. To run the client directly, use `nix run 'github:shk95/agent-journal/v0.4.0#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
 
 The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and summaries use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
 
