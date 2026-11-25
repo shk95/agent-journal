@@ -35,7 +35,7 @@ git push origin server-v0.2.0
 
 The release workflow tests startup, updates, and rollback on Linux x86-64 and ARM64. On success it publishes a GitHub Release with a manifest containing the exact commit. Consider enabling [immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) before publishing the first release.
 
-The timer checks every 15 minutes and selects a newer stable `server-v` release. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
+The timer checks every 15 minutes and selects a stable `server-v` release newer than the installed package version. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
 
 For the switch, the updater fences client requests, stops the old process, and snapshots its database into the new deployment. Requests resume after the new process reports the expected deployment ID and a ready database. On failure the updater restores the previous executable and its original database. It records failed revisions so the timer will wait for a corrected release. An interrupted switch is reconciled when the updater runs again.
 
@@ -94,6 +94,8 @@ An observer can start before Codex. It retries while the socket or network is un
 ## Backups and restore
 
 Create the backup on a private filesystem with sufficient disk space. The snapshot command can run while the journal is serving.
+
+For a managed installation, use `/opt/agent-journal/current/data/journal.sqlite3` as the database path and `/opt/agent-journal/current/package/bin/agent-journal` as the executable.
 
 ```sh
 agent-journal backup --database /var/lib/agent-journal/journal.sqlite3 --output /path/to/private/backup.sqlite3

@@ -71,6 +71,24 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(select_release(releases, "server-v0.9.0"), releases[1])
         self.assertIsNone(select_release(releases, "server-v0.10.0"))
 
+    def test_bootstrap_uses_package_version_as_update_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            (checkout / "pyproject.toml").write_text('[project]\nversion="0.9.0"\n')
+            deployment = Deployment(root, root / "data")
+            executable = deployment.slot(OLD) / "package/bin/agent-journal"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            with patch.object(deployment, "create_data_dir"):
+                deployment.prepare("0" * 40, checkout=checkout)
+            deployment.point_at(OLD)
+            self.assertEqual(deployment.active()["tag"], "server-v0.9.0")
+            self.assertIsNone(
+                select_release([release("server-v0.8.0")], deployment.active()["tag"])
+            )
+
     def test_release_manifest_matches_digest_and_tag(self):
         entry = release("server-v0.2.0")
         commit = "1" * 40

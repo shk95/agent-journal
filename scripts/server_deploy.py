@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -141,6 +142,12 @@ class Deployment:
     def prepare(self, commit, tag=None, checkout=None):
         if not SHA.fullmatch(commit) or (tag and not TAG.fullmatch(tag)):
             raise ValueError("Invalid source revision")
+        baseline = tag
+        if checkout:
+            with (checkout / "pyproject.toml").open("rb") as source:
+                baseline = "server-v" + tomllib.load(source)["project"]["version"]
+            if not TAG.fullmatch(baseline):
+                raise ValueError("The server package must have a three-part version")
         identifier = f"{tag or 'bootstrap'}-{commit[:12]}"
         slot = self.slot(identifier)
         slot.mkdir(parents=True, exist_ok=True)
@@ -167,7 +174,7 @@ class Deployment:
         (slot / "id").write_text(identifier + "\n", encoding="utf-8")
         (slot / "id").chmod(0o644)
         atomic_json(
-            slot / "release.json", {"id": identifier, "tag": tag, "commit": commit}
+            slot / "release.json", {"id": identifier, "tag": baseline, "commit": commit}
         )
         return identifier
 

@@ -39,6 +39,7 @@ jobs:
         if: matrix.runner == 'ubuntu-24.04'
       - run: nix build .#server
       - run: sudo python3 scripts/server_deploy.py install
+      - run: systemctl is-active agent-journal-update.timer && sudo systemctl stop agent-journal-update.timer
       - run: sudo python3 -m tests.test_server_deploy smoke
 
   publish:
