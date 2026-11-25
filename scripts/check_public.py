@@ -110,10 +110,12 @@ def check(revisions):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--history", action="store_true")
+    parser.add_argument(
+        "--history", nargs="?", const="refs/heads/master", metavar="REF"
+    )
     args = parser.parse_args()
     revisions = (
-        git("rev-list", "refs/heads/master").decode().split()
+        git("rev-list", "--end-of-options", args.history).decode().split()
         if args.history
         else [None]
     )

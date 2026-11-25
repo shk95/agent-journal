@@ -15,21 +15,14 @@ One person can run Codex as usual on two work machines and read the resulting jo
 
 Use **10 seconds** as the initial target for displaying a request or terminal state while connected. Show observed progress while the model summary is pending. Measure summary latency and model calls in representative sessions before setting a summary target.
 
-## Work before release
+## Implementation status
 
-| Order | Current state | Definition of done |
+| Area | Implemented | Acceptance evidence |
 | --- | --- | --- |
-| 1. Collection and sync | The observer polls every three seconds and queues snapshots in SQLite. It skips interrupted turns with no completion timestamp. Disabling collection can leave earlier turns marked as running. Registration can miss a turn from the same second. | Recheck temporary misreads and make lasting connection loss visible. Recover the actual turn state when the connection returns. Apply consistent registration and disable boundaries at the server and observer. Reproduce disconnects and retries in regression tests. |
-| 2. Graph and clients | The web shows session markers and a parent session ID. The API lacks the exact fork turn. The terminal shows no session lines. The web overview polls entire histories, and the clients can create notes. | Store the fork turn and display session continuity and independent starts in both clients. Page long histories and limit the overview to active work and recent results. Support editing both kinds of notes while keeping selection stable during updates. |
-| 3. MCP and summaries | Summaries run in a separate process and use some preceding turns. There is no MCP entry point. | Expose scoped reads and explicit note creation through local MCP and report the actual read scope. Match short replies to the preceding request across page boundaries and evaluate whether summaries retain earlier decisions that still apply. |
-| 4. Installation and operation | The server, observer, and terminal clients have CLI entry points and README instructions. Startup, observer health, backup restoration, and two-machine cloud use still need verification. | Install from a clean environment using the published instructions. Verify authenticated HTTPS access, restart recovery, two observers sharing one journal, and restoration of turn and note data into a fresh instance. |
-
-### Implementation order
-
-1. Start with turn status and registration in the [observer](src/agent_journal/observer.py) and [server](src/agent_journal/server.py). Separate observer connectivity from turn status. Reject new turns after disabling collection and avoid leaving previously recorded turns marked as running indefinitely. Test delayed and repeated updates.
-2. Retain the project, session, and turn IDs as the turn key. Verify the exact fork point from real Codex history using the shared turn IDs. When the fork point is unavailable or predates registration, display the relationship supported by the available records. Preserve existing turns and notes during SQLite migrations.
-3. Give MCP reads explicit axes and a result limit. Require a session and turn ID for an attached note. Resolve references in the current session even when another session has a newer turn. Reuse the note ID on retry.
-4. Run the acceptance scenarios on two actual work machines against the cloud server. Record supported Codex versions and deployment commands in the operating instructions.
+| Collection and sync | The observer queues snapshots in SQLite, sends heartbeats for long turns, and distinguishes observation loss from interruption. Both endpoints use the same registration cutoff. | Integration tests exercise same-second registration, transient interruption, disabling collection, two independent observers, reconnection, and replay. |
+| Graph and clients | Both clients render the same graph with fork anchors, use bounded journey pages, and support versioned edits for both kinds of notes. The overview fetches current and recent work. | Tests cover shared fork turns, pagination, editing, and conflict detection. |
+| MCP and summaries | Local MCP reads selected axes and writes explicit notes using target IDs. An unambiguous current Codex request resolves references within its session. The summary worker reads the preceding turn across page boundaries. | Tests cover MCP over stdio, scoped reads, note retries, and previous-turn targeting. |
+| Installation and operation | The loopback development server includes synthetic fixtures. The cloud guide covers TLS, service startup, and backup restoration. | Local integration tests restore a backup and compare the journey and notes. Cloud acceptance remains part of the deployment checklist. |
 
 ## Acceptance scenarios
 
@@ -44,7 +37,7 @@ Selective import of older Codex sessions, collaboration, repository renames, pro
 
 ## Development baseline
 
-The baseline was verified on Codex CLI 0.172.0 with seven automated tests, a JavaScript syntax check, and successful source and wheel builds. The state and cutoff defects were reproduced with temporary SQLite files and synthetic input. Run the cloud acceptance scenarios with two work machines before calling the release complete.
+The local App Server adapter was exercised with Codex CLI 0.172.0. The automated checks run against temporary databases and synthetic fixtures. Use the [setup guide](docs/SETUP.md) to start the local stack and the [cloud guide](docs/OPERATIONS.md) for deployment.
 
 ```sh
 uv sync --locked

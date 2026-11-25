@@ -23,7 +23,13 @@ The default address is `http://127.0.0.1:8765`. For cloud use, keep the database
 
 ## Connect a work machine
 
-Set `AGENT_JOURNAL_TOKEN` to the central server's token. Set `AGENT_JOURNAL_URL` to its HTTPS address. For single-machine development, you can use the default loopback address.
+Connect each work machine once. The command prompts for the token and stores it in the machine's private journal directory.
+
+```sh
+agent-journal connect --url https://journal.example.com
+```
+
+For service managers and temporary tests, the `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` environment variables override saved settings. For single-machine development, you can use the default loopback address.
 
 Register a repository from its checkout.
 
@@ -46,6 +52,7 @@ agent-journal tui
 - Toggle Journey, Turn notes, and Project notes with `1`, `2`, and `3`.
 - Select a turn with `j/k`, open its transcript with `Enter`, and return with `Esc`.
 - Use `m` for a turn note and `n` for a project note.
+- Use `e` to select a note and open it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
 - Open the server address in a browser and sign in with the token. Select a project to read its journal and select a turn to read its transcript.
 
 Use `agent-journal projects` to see the registration state. Use `agent-journal disable` to stop collecting turns for the current project. You can still read the recorded history.
@@ -58,7 +65,19 @@ The observer sends transcripts and a preliminary summary first. A separate worke
 
 During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The clients show when the observer loses contact with a previously running turn or recording stops for the project. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
 
-Collection uses the shared Codex App Server. Use `observe --socket PATH` for a different server socket. The [release plan](../RELEASE_PLAN.md) tracks MCP integration and selective import of older sessions.
+Collection uses the shared Codex App Server. Use `observe --socket PATH` for a different server socket. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
+
+## Read or write from Codex
+
+Register the local MCP interface once on a connected work machine. Restart Codex after changing the configuration.
+
+```sh
+codex mcp add journal -- agent-journal mcp
+```
+
+Provide the GitHub project when Codex cannot infer it from the working directory. Ask Codex to name the axes it reads. For example, ask it to read Journey and then add a note to the previous result from this session. The tool locally resolves the current request and returns the preceding turns with their IDs. If two concurrent requests have identical text, specify the target session and turn.
+
+See [cloud operations](OPERATIONS.md) for deployment and backup restoration.
 
 ## Local development
 

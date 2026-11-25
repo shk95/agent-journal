@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -7,7 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters
+
 from agent_journal.common import OBSERVATION_LEASE, Api, repo_key
+from agent_journal.mcp_server import make_mcp
 from agent_journal.observer import Cache, scan
 from agent_journal.server import make_server
 from agent_journal.summary import work_once
@@ -74,6 +80,7 @@ class TestJournal(unittest.TestCase):
             {
                 "AGENT_JOURNAL_URL": f"http://127.0.0.1:{self.server.server_port}",
                 "AGENT_JOURNAL_TOKEN": "test-token",
+                "AGENT_JOURNAL_HOME": str(self.path),
             },
         )
         self.env.start()
@@ -265,3 +272,69 @@ class TestJournal(unittest.TestCase):
         ):
             self.assertEqual(repo_key(url), "owner/repo")
         self.assertIsNone(repo_key("https://github.com.example/owner/repo"))
+
+    def test_mcp_scoped_read_and_explicit_note(self):
+        self.cache.flush(self.api, scan(self.source, self.cache))
+
+        async def check():
+            params = StdioServerParameters(
+                command=str(Path(sys.executable).with_name("agent-journal")),
+                args=["mcp", "--project", "test/p"],
+                env=dict(os.environ),
+            )
+            async with Client(params, raise_exceptions=True) as client:
+                response = await client.call_tool("read_journal", {})
+                value = response.structured_content
+                self.assertEqual(value["axes"], ["journey"])
+                self.assertNotIn("project_notes", value)
+                args = {
+                    "request_id": "mcp-note",
+                    "body": "Remember this",
+                    "thread": "a",
+                    "turn": "one",
+                }
+                for _ in range(2):
+                    self.assertFalse(
+                        (await client.call_tool("add_note", args)).is_error
+                    )
+                args = {"axes": ["turn_notes", "project_notes"], "thread": "a"}
+                value = (
+                    await client.call_tool("read_journal", args)
+                ).structured_content
+                self.assertNotIn("journey", value)
+                self.assertEqual(value["project_notes"], [])
+                self.assertEqual([n["turn"] for n in value["turn_notes"]], ["one"])
+
+        asyncio.run(check())
+
+    def test_mcp_previous_result_in_current_session(self):
+        current = turn(
+            "current", self.since + 3, "Note the previous result", status="inProgress"
+        )
+        self.source.turns["a"].append(current)
+        self.cache.flush(self.api, scan(self.source, self.cache))
+
+        async def check():
+            with patch(
+                "agent_journal.mcp_server.locate_request",
+                return_value=("a", "current", self.since + 3),
+            ):
+                async with Client(
+                    make_mcp(self.api, "test/p"), raise_exceptions=True
+                ) as client:
+                    response = await client.call_tool(
+                        "read_journal",
+                        {
+                            "current_request": "Note the previous result",
+                            "same_session": True,
+                        },
+                    )
+                    self.assertEqual(
+                        response.structured_content["current_turn"]["turn"], "current"
+                    )
+                    self.assertEqual(
+                        [r["turn"] for r in response.structured_content["journey"]],
+                        ["one"],
+                    )
+
+        asyncio.run(check())

@@ -1,0 +1,47 @@
+name: Checks
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.13.9"
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run --locked python -m unittest discover -s tests -v
+      - run: node --check src/agent_journal/static/app.js
+      - run: uv build
+      - name: Check public files and commit metadata
+        env:
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: uv run --locked python scripts/check_public.py --history "$REVIEW_HEAD"
+      - name: Scan published history for credentials
+        if: matrix.python == '3.13'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir "$RUNNER_TEMP/gitleaks"
+          cd "$RUNNER_TEMP/gitleaks"
+          gh release download v8.30.1 --repo gitleaks/gitleaks \
+            --pattern gitleaks_8.30.1_linux_x64.tar.gz \
+            --pattern gitleaks_8.30.1_checksums.txt
+          grep 'gitleaks_8.30.1_linux_x64.tar.gz$' gitleaks_8.30.1_checksums.txt | sha256sum -c
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          ./gitleaks git --redact --ignore-gitleaks-allow --log-opts="$REVIEW_HEAD" "$GITHUB_WORKSPACE"

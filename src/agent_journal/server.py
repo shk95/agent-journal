@@ -255,6 +255,10 @@ class Conflict(Exception):
 
 
 class JournalHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
+
     def log_message(self, fmt, *args):
         pass
 
@@ -286,18 +290,32 @@ class JournalHandler(BaseHTTPRequestHandler):
         session = hmac.new(
             token.encode(), b"journal-browser-v1", hashlib.sha256
         ).hexdigest()
+        header = self.headers.get("Authorization", "")
+        login = url.path == "/api/login" and self.command == "POST"
+        authenticated = secrets.compare_digest(
+            header.encode(), ("Bearer " + token).encode()
+        ) or (
+            "journal" in cookie
+            and secrets.compare_digest(
+                cookie["journal"].value.encode(), session.encode()
+            )
+        )
+        if not login and not authenticated:
+            return self.reply(401, {"error": "Authentication required"})
+        if not url.path.startswith("/api/"):
+            return self.reply(404, {})
         body = {}
         if self.command == "POST":
             if self.headers.get_content_type() != "application/json":
                 return self.reply(415, {"error": "Expected JSON"})
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 64 * 1024 * 1024:
+            limit = 4096 if login else 64 * 1024 * 1024
+            if not 0 < length <= limit:
                 return self.reply(413, {"error": "Invalid body length"})
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("Expected JSON object")
-        header = self.headers.get("Authorization", "")
-        if url.path == "/api/login" and self.command == "POST":
+        if login:
             if not secrets.compare_digest(
                 str(body.get("token", "")).encode(), token.encode()
             ):
@@ -312,18 +330,6 @@ class JournalHandler(BaseHTTPRequestHandler):
                     "Set-Cookie": f"journal={session}; HttpOnly; SameSite=Strict; Path=/{secure}"
                 },
             )
-        if not (
-            secrets.compare_digest(header.encode(), ("Bearer " + token).encode())
-            or (
-                "journal" in cookie
-                and secrets.compare_digest(
-                    cookie["journal"].value.encode(), session.encode()
-                )
-            )
-        ):
-            return self.reply(401, {"error": "Authentication required"})
-        if not url.path.startswith("/api/"):
-            return self.reply(404, {})
         args = {k: v[0] for k, v in parse_qs(url.query).items()} | body
         with closing(connect(self.server.database)) as db, db:
             if self.command == "POST":
@@ -340,7 +346,7 @@ class JournalHandler(BaseHTTPRequestHandler):
             self.reply(404, {"error": str(e)})
         except Conflict as e:
             self.reply(409, {"error": str(e)})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
 
     do_POST = do_GET

@@ -3,15 +3,24 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 PROJECT = re.compile(r"[a-z0-9][a-z0-9-]*/[a-z0-9_.-]+", re.IGNORECASE)
 OBSERVATION_LEASE = 45
 OBSERVATION_REFRESH = 15
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+HTTP = build_opener(NoRedirect())
 
 
 def turn_start(turn, started):
@@ -63,19 +72,52 @@ def local_repo(cwd):
 
 
 class Api:
-    def __init__(self):
-        self.base = os.environ.get("AGENT_JOURNAL_URL", "http://127.0.0.1:8765").rstrip(
-            "/"
+    def __init__(self, base=None, token=None):
+        path = state_dir() / "connection.json"
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            saved = {}
+        self.base = (
+            base
+            or os.environ.get("AGENT_JOURNAL_URL")
+            or saved.get("url")
+            or "http://127.0.0.1:8765"
+        ).rstrip("/")
+        self.token = (
+            token or os.environ.get("AGENT_JOURNAL_TOKEN") or saved.get("token", "")
         )
-        self.token = os.environ.get("AGENT_JOURNAL_TOKEN", "")
         parts = urlsplit(self.base)
+        if (
+            not parts.hostname
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "Enter a server URL without credentials, a query, or a fragment"
+            )
         if parts.scheme != "https" and not (
             parts.scheme == "http"
             and parts.hostname in ("localhost", "127.0.0.1", "::1")
         ):
             raise ValueError("Use HTTPS for a remote journal server")
         if not self.token:
-            raise ValueError("Set AGENT_JOURNAL_TOKEN first")
+            raise ValueError("Connect this machine or set AGENT_JOURNAL_TOKEN")
+
+    def save(self):
+        parent = state_dir()
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=parent, delete=False
+        ) as file:
+            tmp = Path(file.name)
+            try:
+                json.dump({"url": self.base, "token": self.token}, file)
+                file.close()
+                tmp.replace(parent / "connection.json")
+            finally:
+                tmp.unlink(missing_ok=True)
 
     @property
     def cache_key(self):
@@ -95,7 +137,7 @@ class Api:
             },
         )
         try:
-            with urlopen(req, timeout=8) as r:
+            with HTTP.open(req, timeout=8) as r:
                 return json.load(r)
         except HTTPError as err:
             raise RuntimeError(

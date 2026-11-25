@@ -4,7 +4,6 @@ import argparse
 import math
 import os
 import secrets
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -100,7 +99,7 @@ def main():
             else args.args
         )
         executable = Path(sys.executable).with_name("agent-journal")
-        return subprocess.call([executable, *cli])
+        os.execv(executable, [str(executable), *cli])
     return 0
 
 

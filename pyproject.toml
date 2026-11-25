@@ -3,7 +3,10 @@ name = "agent-journal"
 version = "0.1.0"
 description = "A personal journal for Codex sessions across GitHub projects"
 requires-python = ">=3.11"
-dependencies = ["websockets>=15,<17"]
+dependencies = [
+    "mcp>=2,<3",
+    "websockets>=15,<17",
+]
 
 [project.scripts]
 agent-journal = "agent_journal.cli:main"
