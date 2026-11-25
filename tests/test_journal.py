@@ -136,6 +136,18 @@ class TestJournal(unittest.TestCase):
         self.assertEqual(rows[-1]["parent"], "a")
         self.assertEqual(rows[-1]["parent_turn"], "one")
         self.assertEqual([row["graph"] for row in rows], ["●─┐", "  ●"])
+        browser_rows = self.api.request("journey", project="test/p", lanes="true")
+        self.assertEqual(
+            [row["graph_lanes"] for row in browser_rows],
+            [
+                {
+                    "lane": 0,
+                    "tracks": [[0, "a", False, False], [1, "b", False, True]],
+                    "forks": [1],
+                },
+                {"lane": 1, "tracks": [[1, "b", True, False]], "forks": []},
+            ],
+        )
         args = {"project": "test/p", "thread": "a", "turn": "one"}
         self.assertEqual(self.api.request("transcript", **args)[-1]["text"], "green")
         note = args | {"id": "memo", "body": "remember"}

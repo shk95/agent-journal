@@ -115,6 +115,12 @@ input[type="checkbox"] {
   margin: 4px 0;
 }
 .board {
+  --lane-step: 18px;
+  --lane-start: 16px;
+  --graph-width: calc(12px + var(--lane-count) * var(--lane-step));
+  --graph-point: 22px;
+  --graph-paper: #f0f2eb;
+  --journey-padding: 12px 14px;
   display: grid;
   align-items: start;
   border-top: 2px solid var(--ink);
@@ -145,6 +151,85 @@ input[type="checkbox"] {
   background: none;
   text-align: left;
   padding: 0;
+}
+.journey-head {
+  padding-left: calc(var(--graph-width) + 14px);
+}
+.cell.journey-cell {
+  display: grid;
+  grid-template-columns: var(--graph-width) minmax(0, 1fr);
+  padding: 0;
+}
+.journey-cell .rowbtn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--journey-padding);
+  border-radius: 0;
+}
+.journey-cell .rowbtn:hover {
+  background: #f1f4ec;
+}
+.journey-cell .rowbtn:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+}
+.journey-graph {
+  position: relative;
+  margin-bottom: -1px;
+  background: var(--graph-paper);
+  border-right: 1px solid #dce1d6;
+}
+.journey-graph > span {
+  --track-x: calc(var(--lane-start) + var(--lane) * var(--lane-step));
+  position: absolute;
+  background: var(--session-color);
+}
+.graph-fork {
+  top: calc(var(--graph-point) - 1px);
+  left: var(--track-x);
+  width: calc(var(--fork-span) * var(--lane-step));
+  height: 2px;
+}
+.graph-track {
+  left: calc(var(--track-x) - 1px);
+  width: 2px;
+  z-index: 1;
+}
+.graph-track.incoming {
+  top: 0;
+  height: var(--graph-point);
+}
+.graph-track.outgoing {
+  top: var(--graph-point);
+  bottom: 0;
+}
+.graph-track.through {
+  top: 0;
+  bottom: 0;
+}
+.journey-graph > .graph-crossing {
+  top: calc(var(--graph-point) - 1px);
+  left: calc(var(--track-x) - 4px);
+  width: 8px;
+  height: 2px;
+  background: var(--graph-paper);
+}
+.graph-point {
+  top: var(--graph-point);
+  left: var(--track-x);
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--graph-paper);
+  border-radius: 50%;
+  z-index: 2;
+}
+.session-id {
+  font-weight: 700;
+}
+.fork-context {
+  flex-basis: 100%;
 }
 .req {
   font-weight: 650;
@@ -232,10 +317,6 @@ textarea {
 #auth button {
   margin-top: 12px;
 }
-.graph {
-  white-space: pre;
-  color: var(--green);
-}
 .note {
   border-left: 2px solid #9cb6a1;
   padding-left: 8px;
@@ -248,12 +329,19 @@ textarea {
     display: block;
   }
   .board {
+    --lane-step: 14px;
+    --lane-start: 13px;
+    --graph-point: 17px;
+    --journey-padding: 8px;
     font-size: 14px;
   }
   .head,
   .cell,
   .free {
     padding: 8px;
+  }
+  .head.journey-head {
+    padding-left: calc(var(--graph-width) + 8px);
   }
   .heading {
     margin-bottom: 12px;

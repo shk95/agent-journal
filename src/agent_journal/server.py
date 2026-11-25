@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .common import OBSERVATION_LEASE, PROJECT, turn_start
-from .graph import graph
+from .graph import graph, layout
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -88,8 +88,12 @@ def journey(db, project, args):
         sql += " LIMIT ?"
         values.append(max(1, min(200, int(args["limit"]))))
     rows = with_observation(listing(db, sql, values)[::-1])
-    for row, line in zip(rows, graph(rows)):
-        row["graph"] = line
+    if args.get("lanes") == "true":
+        for row, lanes in zip(rows, layout(rows)):
+            row["graph_lanes"] = lanes
+    else:
+        for row, line in zip(rows, graph(rows)):
+            row["graph"] = line
     return rows
 
 

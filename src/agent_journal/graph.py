@@ -1,7 +1,7 @@
 """Draw session lines over a chronological page of journey rows."""
 
 
-def graph(rows):
+def layout(rows):
     by_key = {(row["thread"], row["turn"]): i for i, row in enumerate(rows)}
     first, last, forks = {}, {}, {}
     for index, row in enumerate(rows):
@@ -26,20 +26,34 @@ def graph(rows):
             lane_ends[lane] = last[session]
         lanes[session] = lane
 
-    lines = []
+    branches = {}
+    for session, anchor in forks.items():
+        branches.setdefault(anchor, []).append(lanes[session])
     for index, row in enumerate(rows):
-        cells = [" "] * (2 * len(lane_ends))
-        for session, lane in lanes.items():
-            if starts[session] <= index <= last[session]:
-                cells[lane * 2] = "│"
-        point = lanes[row["thread"]] * 2
-        cells[point] = "●"
-        for session, anchor in forks.items():
-            if anchor != index:
-                continue
-            branch = lanes[session] * 2
-            for i in range(min(point, branch) + 1, max(point, branch)):
-                cells[i] = "┼" if cells[i] == "│" else "─"
-            cells[branch] = "┐" if point < branch else "┌"
-        lines.append("".join(cells).rstrip())
-    return lines
+        yield {
+            "lane": lanes[row["thread"]],
+            "tracks": [
+                (lane, session, starts[session] < index, index < last[session])
+                for session, lane in lanes.items()
+                if starts[session] <= index <= last[session]
+            ],
+            "forks": branches.get(index, []),
+        }
+
+
+def text_graph(row):
+    cells = [" "] * (2 * max(track[0] for track in row["tracks"]) + 1)
+    for lane, _, _, _ in row["tracks"]:
+        cells[lane * 2] = "│"
+    point = row["lane"] * 2
+    cells[point] = "●"
+    for lane in row["forks"]:
+        branch = lane * 2
+        for i in range(min(point, branch) + 1, max(point, branch)):
+            cells[i] = "┼" if cells[i] == "│" else "─"
+        cells[branch] = "┐" if point < branch else "┌"
+    return "".join(cells).rstrip()
+
+
+def graph(rows):
+    return [text_graph(row) for row in layout(rows)]

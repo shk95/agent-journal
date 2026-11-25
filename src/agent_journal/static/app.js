@@ -151,12 +151,74 @@ function overview(entries) {
     );
   return out;
 }
+
+const sessionColors = [
+  "#26754e",
+  "#425da9",
+  "#a14728",
+  "#7a4c98",
+  "#0e737a",
+  "#a13660",
+  "#816024",
+  "#496277",
+];
+function sessionColor(thread) {
+  let index = 0;
+  for (const char of thread)
+    index = (index * 31 + char.codePointAt(0)) % sessionColors.length;
+  return sessionColors[index];
+}
+
+function graphMark(className, lane, color) {
+  const mark = node("span", undefined, className);
+  mark.style.setProperty("--lane", lane);
+  mark.style.setProperty("--session-color", color);
+  return mark;
+}
+
+function graphGutter(row) {
+  const graph = node("div", undefined, "journey-graph");
+  graph.setAttribute("aria-hidden", "true");
+  const { lane, tracks, forks } = row.graph_lanes;
+  const color = sessionColor(row.thread);
+  const left = Math.min(lane, ...forks);
+  const right = Math.max(lane, ...forks);
+  if (left < right) {
+    const fork = graphMark("graph-fork", left, color);
+    fork.style.setProperty("--fork-span", right - left);
+    graph.append(fork);
+  }
+  for (const [track, thread, above, below] of tracks) {
+    const ink = sessionColor(thread);
+    if (above || below) {
+      const side = above && below ? "through" : above ? "incoming" : "outgoing";
+      graph.append(graphMark("graph-track " + side, track, ink));
+    }
+    if (above && below && track !== lane && left < track && track < right)
+      graph.append(graphMark("graph-crossing", track, ink));
+  }
+  graph.append(graphMark("graph-point", lane, color));
+  return graph;
+}
+
 function board(project, rows, notes) {
   const cols = axes.filter((x) => visible.has(x)),
     grid = node("div", undefined, "board");
   if (!cols.length) return node("p", "Select a column to show.", "empty");
+  const journeyVisible = visible.has("Journey");
+  if (journeyVisible) {
+    const laneCount = Math.max(
+      1,
+      ...rows.flatMap((r) => r.graph_lanes.tracks.map(([lane]) => lane + 1)),
+    );
+    grid.style.setProperty("--lane-count", laneCount);
+  }
   grid.style.gridTemplateColumns = cols
-    .map((x) => (x === "Journey" ? "minmax(220px,2fr)" : "minmax(135px,1fr)"))
+    .map((axis) =>
+      axis === "Journey"
+        ? "minmax(calc(190px + var(--graph-width)),2fr)"
+        : "minmax(135px,1fr)",
+    )
     .join(" ");
   function put(el, name, row) {
     el.style.gridColumn = String(cols.indexOf(name) + 1);
@@ -164,18 +226,21 @@ function board(project, rows, notes) {
     grid.append(el);
   }
   for (const a of cols) {
-    const head = node("div", undefined, "head");
+    const head = node(
+      "div",
+      undefined,
+      a === "Journey" ? "head journey-head" : "head",
+    );
     head.append(node("h2", a));
     if (a === "Project notes")
       head.append(action("＋", () => editNote(project), "small"));
     put(head, a, 1);
   }
+  const seenSessions = new Set();
   rows.forEach((r, i) => {
-    if (visible.has("Journey")) {
-      const cell = node("div", undefined, "cell"),
+    if (journeyVisible) {
+      const cell = node("div", undefined, "cell journey-cell"),
         button = action("", () => transcript(project, r), "rowbtn");
-      const mark = node("span", r.graph, "graph");
-      mark.setAttribute("aria-hidden", "true");
       const meta = node("div", undefined, "meta");
       const time = new Date(r.started * 1000).toLocaleString("en-US", {
         month: "numeric",
@@ -183,25 +248,40 @@ function board(project, rows, notes) {
         hour: "2-digit",
         minute: "2-digit",
       });
+      const session = node("span", r.thread.slice(-6), "session-id");
+      session.style.color = sessionColor(r.thread);
+      session.title = "Session " + r.thread;
       meta.append(
-        mark,
         node("span", time),
-        node("span", r.thread.slice(-6)),
+        session,
         node("span", statusLabel(r), statusLabel(r) === labels.inProgress ? "live" : ""),
       );
-      if (r.parent && !rows.slice(0, i).some(({ thread }) => thread === r.thread))
-        meta.append(node("span", "Fork of " + r.parent.slice(-6)));
+      if (r.parent && !seenSessions.has(r.thread)) {
+        const parentVisible = rows.slice(0, i).some(
+          ({ thread, turn }) => thread === r.parent && turn === r.parent_turn,
+        );
+        const detail =
+          r.parent_turn && !parentVisible ? " · Parent turn outside this page" : "";
+        const fork = node(
+          "span",
+          "Fork of " + r.parent.slice(-6) + detail,
+          "fork-context",
+        );
+        fork.title = "Parent session " + r.parent;
+        meta.append(fork);
+      }
+      seenSessions.add(r.thread);
       button.append(
         meta,
         node("span", r.prompt, "req"),
         node("span", r.summary, "result"),
       );
-      cell.append(button);
+      cell.append(graphGutter(r), button);
       put(cell, "Journey", i + 2);
     }
     if (visible.has("Turn notes")) {
       const cell = node("div", undefined, "cell");
-      if (!visible.has("Journey")) cell.append(node("small", r.prompt));
+      if (!journeyVisible) cell.append(node("small", r.prompt));
       for (const n of notes.filter(
         (n) => n.turn === r.turn && n.thread === r.thread,
       ))
@@ -237,7 +317,7 @@ async function refresh() {
     const key = decodeURIComponent(location.hash.slice(1));
     const data = key
       ? await Promise.all([
-          api("journey", { project: key, limit: pageSize + 1, before }),
+          api("journey", { project: key, limit: pageSize + 1, before, lanes: true }),
           api("notes", { project: key }),
         ])
       : await api("overview");

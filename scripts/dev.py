@@ -30,18 +30,41 @@ def seed(api):
     project = next(row for row in api.request("projects") if row["project"] == FIXTURE)
     samples = [
         ("review", "01", None, "Review the sample import", "Imported the sample rows"),
+        ("docs", "04", None, "Check the setup guide", "Found an outdated command"),
         ("review", "02", None, "Try an empty input", "Empty input returns no rows"),
-        ("tests", "03", "review", "Add an empty-input test", "Regression test passes"),
+        (
+            "tests",
+            "03",
+            ("review", "02"),
+            "Add an empty-input test",
+            "Regression test passes",
+        ),
+        ("docs", "05", None, "Update the setup command", "Verified the new example"),
+        (
+            "review",
+            "06",
+            None,
+            "Review malformed rows",
+            "Invalid rows include a reason",
+        ),
+        (
+            "tests",
+            "07",
+            ("review", "02"),
+            "Add a blank-line case",
+            "Blank lines are ignored",
+        ),
     ]
     for index, (thread, turn, parent, prompt, summary) in enumerate(samples):
+        parent_thread, parent_turn = parent or (None, None)
         api.request(
             "turns",
             {
                 "project": FIXTURE,
                 "thread": thread,
                 "turn": turn,
-                "parent": parent,
-                "parent_turn": "01" if parent else None,
+                "parent": parent_thread,
+                "parent_turn": parent_turn,
                 "started": math.ceil(project["since"]) + index,
                 "prompt": prompt,
                 "summary": summary,

@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from agent_journal.common import Api
 from agent_journal.observer import Codex
+from scripts.dev import FIXTURE, seed
 
 PROJECT = "example/journal-smoke"
 TASK = "Verify the sample import."
@@ -340,6 +341,29 @@ def check_clients(path, repo, cli, env, api, channel):
                 page.get_by_role("button", name="Close", exact=True).click()
                 page.get_by_label("Journey", exact=True).uncheck()
                 page.locator(".rowbtn").first.wait_for(state="detached")
+                seed(api)
+                page.get_by_role("link", name="All projects").click()
+                page.get_by_role("link", name=FIXTURE, exact=True).click()
+                page.get_by_label("Journey", exact=True).check()
+                cells = page.locator(".journey-cell")
+                cells.filter(has_text="Add a blank-line case").wait_for()
+                if cells.locator(".graph-point").count() != 7:
+                    raise RuntimeError("Each fixture turn needs one graph point")
+                first = cells.filter(has_text="Review the sample import")
+                next_turn = cells.filter(has_text="Check the setup guide")
+                above = first.locator(".graph-track.outgoing").bounding_box()
+                below = next_turn.locator(".graph-track.through").bounding_box()
+                if (
+                    above["x"] != below["x"]
+                    or abs(above["y"] + above["height"] - below["y"]) > 1
+                ):
+                    raise RuntimeError("A session line has a gap between turns")
+                fork = cells.filter(has_text="Try an empty input")
+                fork.locator(".graph-fork").wait_for()
+                fork.locator(".graph-crossing").wait_for()
+                cells.filter(has_text="Add an empty-input test").get_by_text(
+                    "Fork of review", exact=True
+                ).wait_for()
                 if errors:
                     raise RuntimeError(f"Browser errors: {errors}")
             finally:
