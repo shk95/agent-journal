@@ -75,6 +75,8 @@ def main():
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
     commands.add_parser("projects")
+    commands.add_parser("setup-codex", help="install global Codex tools and recording hooks")
+    commands.add_parser("codex-hook")
     connection = commands.add_parser("connect", help="set up the journal connection")
     connection.add_argument("--url")
     mcp = commands.add_parser("mcp")
@@ -84,6 +86,7 @@ def main():
     watch.add_argument("--socket", type=Path)
     watch.add_argument("--interval", type=float, default=3)
     watch.add_argument("--once", action="store_true")
+    watch.add_argument("--codex-lock", type=int, help=argparse.SUPPRESS)
     args = p.parse_args(sys.argv[1:] or ["tui"])
     try:
         if args.command == "backup":
@@ -94,6 +97,16 @@ def main():
             return
         if args.command == "connect":
             connect(args.url)
+            return
+        if args.command == "setup-codex":
+            from .codex_integration import setup_codex
+
+            setup_codex()
+            return
+        if args.command == "codex-hook":
+            from .codex_integration import codex_hook
+
+            codex_hook()
             return
         if args.command == "serve":
             from .server import make_server
@@ -153,24 +166,11 @@ def main():
             for row in projects:
                 print(row["project"], "active" if row["active"] else "disabled")
         elif args.command == "observe":
-            from .observer import Cache, observe
+            from .observer import collect
 
             if args.interval <= 0:
                 raise ValueError("Interval must be positive")
-            import threading
-
-            from .summary import worker
-
-            path = state_dir() / f"observer-{api.cache_key}.sqlite3"
-            cache = Cache(path)
-            stop = threading.Event()
-            if not args.once:
-                threading.Thread(target=worker, args=(path, stop), daemon=True).start()
-            try:
-                observe(api, cache, args.socket, args.interval, args.once)
-            finally:
-                stop.set()
-                cache.db.close()
+            collect(api, args.socket, args.interval, args.once, args.codex_lock)
         else:
             key = current(args.project)
             api.request("disable", {"project": key})

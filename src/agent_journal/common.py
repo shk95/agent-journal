@@ -41,6 +41,10 @@ def state_dir():
     return folder
 
 
+def codex_home():
+    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+
+
 def repo_key(remote):
     if not remote:
         return None

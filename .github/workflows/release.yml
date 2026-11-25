@@ -58,6 +58,8 @@ jobs:
           "$CLIENT" --version
           "$CLIENT" tui --help
           "$CLIENT" observe --help
+          "$CLIENT" setup-codex --help
+          printf '{}' | "$CLIENT" codex-hook
           "$CLIENT" mcp </dev/null
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

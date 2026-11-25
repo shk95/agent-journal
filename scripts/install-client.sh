@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install a published client and register its local Codex MCP entry.
+# Install a published client and its local Codex integration.
 set -eu
 
 fail() {
@@ -51,10 +51,9 @@ mv -f "$temp/$asset" "$client"
 printf 'Installed Agent Journal %s at %s\n' "$tag" "$client"
 
 if command -v codex >/dev/null 2>&1; then
-    codex mcp add journal -- "$client" mcp
-    printf 'Restart Codex to use the journal MCP tools.\n'
+    "$client" setup-codex
 else
-    printf 'After installing Codex, run: codex mcp add journal -- "%s" mcp\n' "$client"
+    printf 'After installing Codex, run "%s" setup-codex.\n' "$client"
 fi
 
 printf 'For a first-time server connection, run "%s" connect.\n' "$client"

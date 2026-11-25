@@ -6,6 +6,8 @@
 
 Use the standalone GitHub Release installer by default, including when an agent is asked to install the client using the repository URL. It needs no Nix, Python installation, or source checkout. The client supports Apple Silicon macOS, Linux x86-64, and Linux ARM64. The Linux builds require glibc 2.35 or later.
 
+The automatic recording setup below requires a release newer than v0.2.0. For an older release, use the setup guide linked from its release page.
+
 ```sh
 (
   set -eu
@@ -20,7 +22,7 @@ Use the standalone GitHub Release installer by default, including when an agent 
 
 The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.2.0` to the installer to select a specific version. Run the installer again to upgrade.
 
-Verify the installed client with `agent-journal --version`. If Codex is on PATH, the installer sets its user-level `journal` MCP entry to the installed binary's absolute path. Restart Codex and complete [the first server connection](#connect-a-work-machine) using the server URL and token. Use a signed-in Codex CLI for observation and summaries and a signed-in GitHub CLI for project registration. Git identifies the current checkout.
+Verify the installed client with `agent-journal --version`. If Codex is on PATH, the installer installs the user-level `journal` MCP entry and recording hooks. Complete [the first server connection](#connect-a-work-machine), then [trust the hooks once in Codex](#set-up-codex).
 
 ### Optional Nix client
 
@@ -67,11 +69,7 @@ If you start from Codex, the first journal tool call prompts you to run this com
 
 The TUI, local MCP tools, and observer use the same saved connection on each work machine. The `AGENT_JOURNAL_HOME` environment variable selects a different state directory. For service managers and temporary tests, `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` override saved settings.
 
-If you installed with Nix or from source, set up the [Codex MCP entry](#set-up-codex). Ask Codex to register the repository with Agent Journal. Start one observer per work machine to collect turns.
-
-```sh
-agent-journal observe
-```
+If you installed with Nix or from source, run [Codex setup](#set-up-codex). Ask Codex to register the repository with Agent Journal. With the recording hooks trusted, Codex starts collection automatically.
 
 Open the terminal client from a second pane in the same repository. It reads the GitHub `origin` from the current checkout, including from a subdirectory, and exits with a message if it cannot identify a registered project. To select a different project, run `agent-journal tui --project OWNER/REPO`.
 
@@ -103,17 +101,21 @@ The observer sends transcripts and a preliminary summary first. A separate worke
 
 During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The clients show when the observer loses contact with a previously running turn or recording stops for the project. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
 
-Collection uses the shared Codex App Server. Use `observe --socket PATH` for a different server socket. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
+Collection uses the shared Codex App Server. Session hooks start one collector for concurrent Codex sessions and let it finish pending work after the last session ends. From the next session it resumes any work saved to the local queue. For troubleshooting or a custom App Server socket, use `agent-journal observe --socket PATH` to run the collector in the foreground. Automatic collector diagnostics go to `observer.log` in the local state directory. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
 
 ## Set up Codex
 
-The standalone installer sets up the local MCP interface when Codex is available. For a manual setup, add it to your user-level configuration once per work machine. Restart Codex after changing the configuration.
+The standalone installer configures Codex globally when the CLI is available. For an existing installation or a client installed another way, run the same setup once per work machine.
 
 ```sh
-codex mcp add journal -- agent-journal mcp
+agent-journal setup-codex
 ```
 
-After connecting the machine, ask Codex to register the repository from its checkout. Its `register_project` tool verifies the journal connection, checks the repository using the signed-in GitHub CLI, and marks it active on the journal server. If the checkout is ambiguous, give Codex the GitHub `OWNER/REPO`. You can ask Codex to register the same project again to resume collection after disabling it.
+Open Codex and use `/hooks` to review and trust the Agent Journal `SessionStart` and `SessionEnd` hooks. Then start a new session. Trust applies to the hook definitions and is reused across repositories and regular client upgrades at the same installation path. Recording uses Codex CLI 0.172.0 or a compatible version with the shared App Server.
+
+If you are upgrading from a release that required a manually started collector, stop that process before opening the first Codex session with hooks.
+
+After connecting the machine, ask Codex to register the repository from its checkout. Its `register_project` tool verifies the journal connection, checks the repository using the signed-in GitHub CLI, and marks it active on the journal server. Subsequent turns in that repository are recorded automatically. If the checkout is ambiguous, give Codex the GitHub `OWNER/REPO`. You can ask Codex to register the same project again to resume collection after disabling it.
 
 Ask Codex to name the axes it reads. For example, ask it to read Journey and then add a note to the previous result from this session. The tool locally resolves the current request and returns the preceding turns with their IDs. If two concurrent requests have identical text, specify the target session and turn.
 
@@ -170,7 +172,7 @@ uv build
 
 ### Local Codex and client smoke test
 
-Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server, a separate real Codex App Server, the summary worker and the observer. Codex registers the checkout through MCP using a synthetic GitHub CLI response. The test also checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes. The test uses temporary databases, a Git checkout, sockets, and a generated journal token.
+Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server and a separate real Codex App Server, verifies that the installed hooks require trust, and trusts them in the temporary Codex configuration. Codex starts and stops the collector as sessions open and close, and registers the checkout through MCP using a synthetic GitHub CLI response. The test checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes.
 
 ```sh
 uv run --locked --with playwright==1.65.2 python -m playwright install chromium

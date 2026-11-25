@@ -4,22 +4,23 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
-from contextlib import closing
+from contextlib import ExitStack, closing
+from fcntl import LOCK_UN, flock
 from itertools import chain, pairwise
-from pathlib import Path
 
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import unix_connect
 
-from .common import OBSERVATION_REFRESH, local_repo, repo_key, turn_start
-from .summary import evidence
+from .codex_integration import Lifecycle, collector_lock, observer_path
+from .common import OBSERVATION_REFRESH, codex_home, local_repo, repo_key, turn_start
+from .summary import evidence, worker
 
 
 class Codex:
     def __init__(self, path=None):
-        home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        path = path or home / "app-server-control/app-server-control.sock"
+        path = path or codex_home() / "app-server-control/app-server-control.sock"
         self.ws = unix_connect(
             str(path),
             open_timeout=3,
@@ -191,6 +192,13 @@ class Cache:
                 )
                 self.heartbeats[key] = now
 
+    def has_pending_work(self):
+        return self.db.execute(
+            """SELECT EXISTS(SELECT 1 FROM snapshots WHERE pending IS NOT NULL)
+                   OR EXISTS(SELECT 1 FROM summaries WHERE ready <= ?)""",
+            (time.time(),),
+        ).fetchone()[0]
+
 
 def scan(rpc, cache):
     active = set()
@@ -315,16 +323,64 @@ def scan_thread(rpc, cache, thread, project, since, active=None):
     return stable and parent_available
 
 
-def observe(api, cache, socket, interval, once):
+def collect(api, socket, interval, once, lock_fd=None):
+    path = observer_path(api)
+    stop = threading.Event()
+
+    def start_summary_worker():
+        thread = threading.Thread(target=worker, args=(path, stop), daemon=True)
+        thread.start()
+        return thread
+
+    with ExitStack() as resources:
+        lock = os.fdopen(lock_fd, "a") if lock_fd is not None else collector_lock(path)
+        if lock is None:
+            raise ValueError("An Agent Journal collector is already running")
+        resources.enter_context(lock)
+        resources.callback(flock, lock, LOCK_UN)
+        cache = Cache(path)
+        resources.callback(cache.db.close)
+        if not once:
+            resources.callback(stop.set)
+            summary_thread = start_summary_worker()
+        if once or lock_fd is None:
+            observe(api, cache, socket, interval, once)
+            return
+
+        lifecycle = Lifecycle(path.parent / "codex-sessions")
+
+        def after_cycle(loaded):
+            nonlocal summary_thread
+            lifecycle.prune(loaded)
+            with lifecycle.events():
+                if not lifecycle.finished(cache):
+                    if stop.is_set() and not summary_thread.is_alive():
+                        stop.clear()
+                        summary_thread = start_summary_worker()
+                    return False
+                stop.set()
+                if summary_thread.is_alive():
+                    return False
+                # Release the collector lock before a new session checks it.
+                resources.close()
+                return True
+
+        observe(api, cache, socket, interval, once, after_cycle)
+
+
+def observe(api, cache, socket, interval, once, after_cycle=None):
     while True:
         errors = []
         active = set()
+        loaded = None
         try:
             cache.refresh(api.request("projects"))
         except (OSError, RuntimeError, ValueError, WebSocketException) as e:
             errors.append(f"Project registry: {e}")
         try:
             with closing(Codex(socket)) as rpc:
+                if after_cycle is not None:
+                    loaded = set(chain.from_iterable(rpc.pages("thread/loaded/list", {})))
                 active = scan(rpc, cache)
         except (OSError, RuntimeError, ValueError, WebSocketException) as e:
             errors.append(f"Codex: {e}")
@@ -337,5 +393,7 @@ def observe(api, cache, socket, interval, once):
                 raise RuntimeError(" / ".join(errors))
             print(" / ".join(errors), file=sys.stderr)
         if once:
+            return
+        if after_cycle is not None and after_cycle(loaded):
             return
         time.sleep(interval)

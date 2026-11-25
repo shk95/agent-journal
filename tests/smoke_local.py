@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_journal.codex_integration import collector_lock
 from agent_journal.common import Api
 from agent_journal.observer import Codex
 from scripts.dev import FIXTURE, seed
@@ -29,6 +30,7 @@ TASK = "Verify the sample import."
 NOTE_TASK = "Attach a note to the previous result."
 ANSWER = "The sample import passed."
 SUMMARY = "Verified the sample import."
+NOTE_SUMMARY = "Attached a regression note to the sample import."
 NOTE = "Keep a regression case."
 EDIT = "Keep the regression fixture with the import."
 PROJECT_NOTE = "Review other import formats later."
@@ -79,7 +81,12 @@ class FixtureModel(BaseHTTPRequestHandler):
         }
         name = call_id = None
         if "observations for the journal" in serialized:
-            answer = SUMMARY if TASK in serialized else "Saved the requested turn note."
+            if NOTE_TASK in serialized:
+                self.server.note_summary_started.set()
+                self.server.release_note_summary.wait(timeout=15)
+                answer = NOTE_SUMMARY
+            else:
+                answer = SUMMARY
         elif REGISTER_TASK in serialized:
             if "fixture-register" not in outputs:
                 name, call_id = "register_project", "fixture-register"
@@ -490,7 +497,6 @@ def smoke(path, binary, channel, cli):
         for key, value in os.environ.items()
         if key not in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID")
     } | settings
-    rpc = path / "rpc"
     with (
         ThreadingHTTPServer(("127.0.0.1", 0), FixtureModel) as provider,
         child(
@@ -500,6 +506,8 @@ def smoke(path, binary, channel, cli):
             text=True,
         ) as server,
     ):
+        provider.note_summary_started = threading.Event()
+        provider.release_note_summary = threading.Event()
         threading.Thread(target=provider.serve_forever, daemon=True).start()
         try:
             line = server.stdout.readline()
@@ -529,6 +537,8 @@ def smoke(path, binary, channel, cli):
             config = provider_config(f"http://127.0.0.1:{provider.server_port}/v1")
             runtime = path / "codex-state"
             runtime.mkdir()
+            rpc = runtime / "app-server-control/app-server-control.sock"
+            rpc.parent.mkdir()
             environment["CODEX_HOME"] = str(runtime)
             local_config = config + [
                 "-c",
@@ -536,11 +546,8 @@ def smoke(path, binary, channel, cli):
                 "-c",
                 "log_dir=" + json.dumps(str(runtime)),
             ]
-            mcp_args = ["mcp", "--socket", str(rpc)]
             for key, value in {
-                "command": str(cli),
-                "args": mcp_args,
-                "env_vars": ["AGENT_JOURNAL_HOME", "PATH"],
+                "env_vars": ["AGENT_JOURNAL_HOME", "CODEX_HOME", "PATH"],
                 "default_tools_approval_mode": "approve",
             }.items():
                 local_config.extend(
@@ -552,9 +559,21 @@ def smoke(path, binary, channel, cli):
                 "#!/bin/sh\nexec " + shlex.join([binary, *config]) + ' "$@"\n'
             )
             wrapper.chmod(0o700)
-            observer_env = environment | {
-                "PATH": str(path) + os.pathsep + environment["PATH"]
+            codex_env = environment | {
+                "PATH": os.pathsep.join((str(path), str(fixture_bin), environment["PATH"])),
+                "AGENT_JOURNAL_URL": "",
+                "AGENT_JOURNAL_TOKEN": "",
             }
+            hooks_file = runtime / "hooks.json"
+            unrelated_hook = {"hooks": [{"type": "command", "command": "true"}]}
+            hooks_file.write_text(
+                json.dumps({"hooks": {"Interrupt": [unrelated_hook]}}),
+                encoding="utf-8",
+            )
+            for _ in range(2):
+                subprocess.run([cli, "setup-codex"], env=codex_env, check=True)
+            if json.loads(hooks_file.read_text())["hooks"]["Interrupt"] != [unrelated_hook]:
+                raise RuntimeError("Setup changed an unrelated Codex hook")
 
             with contextlib.ExitStack() as processes:
                 processes.enter_context(
@@ -565,29 +584,42 @@ def smoke(path, binary, channel, cli):
                             "--listen",
                             "unix://" + str(rpc),
                             "--disable",
-                            "hooks",
-                            "--disable",
                             "plugins",
                             *local_config,
                         ],
                         cwd=path,
-                        env=environment
-                        | {
-                            "PATH": str(fixture_bin) + os.pathsep + environment["PATH"],
-                            "AGENT_JOURNAL_URL": "",
-                            "AGENT_JOURNAL_TOKEN": "",
-                        },
+                        env=codex_env,
                     )
                 )
                 wait_for("the Codex socket", rpc.exists)
-                processes.enter_context(
-                    child(
-                        [cli, "observe", "--socket", rpc, "--interval", "0.35"],
-                        cwd=repo,
-                        env=observer_env,
-                    )
-                )
                 with contextlib.closing(Codex(rpc)) as codex:
+                    hooks = codex.call(
+                        "hooks/list", {"cwds": [str(repo)]}
+                    )["data"][0]["hooks"]
+                    hooks = [hook for hook in hooks if hook["eventName"] != "interrupt"]
+                    if sorted(hook["eventName"] for hook in hooks) != [
+                        "sessionEnd", "sessionStart"
+                    ]:
+                        raise RuntimeError("Expected two Codex lifecycle hooks")
+                    if any(hook["trustStatus"] != "untrusted" for hook in hooks):
+                        raise RuntimeError("Installer must leave hook trust to Codex")
+                    # Mirror the trust operation of /hooks in this isolated Codex home.
+                    codex.call(
+                        "config/batchWrite",
+                        {
+                            "edits": [
+                                {
+                                    "keyPath": "hooks.state",
+                                    "value": {
+                                        hook["key"]: {"trusted_hash": hook["currentHash"]}
+                                        for hook in hooks
+                                    },
+                                    "mergeStrategy": "upsert",
+                                }
+                            ],
+                            "reloadUserConfig": True,
+                        },
+                    )
                     options = {
                         "cwd": str(repo),
                         "historyMode": "paginated",
@@ -611,6 +643,20 @@ def smoke(path, binary, channel, cli):
                     )
                     session = codex.call("thread/start", options)["thread"]["id"]
                     turn = start_turn(codex, session, TASK)
+                    unknown = path / "unknown"
+                    unknown.mkdir()
+                    subprocess.run(["git", "-C", unknown, "init", "-q"], check=True)
+                    subprocess.run(
+                        [
+                            "git", "-C", unknown, "remote", "add", "origin",
+                            "https://github.com/example/unregistered.git",
+                        ],
+                        check=True,
+                    )
+                    unregistered = codex.call(
+                        "thread/start", options | {"cwd": str(unknown)}
+                    )["thread"]["id"]
+                    private_turn = start_turn(codex, unregistered, TASK)
 
                     def recorded(identifier, **expected):
                         return any(
@@ -626,6 +672,21 @@ def smoke(path, binary, channel, cli):
                         "the separate Codex summary",
                         lambda: recorded(turn, status="completed", summary=SUMMARY),
                     )
+                    marker_dir = Path(settings["AGENT_JOURNAL_HOME"]) / "codex-sessions"
+                    wait_for(
+                        "three Codex session markers",
+                        lambda: len(list(marker_dir.glob("session-*"))) == 3,
+                    )
+                    codex.call("thread/archive", {"threadId": registration})
+                    codex.call("thread/archive", {"threadId": unregistered})
+                    wait_for(
+                        "one remaining session marker",
+                        lambda: len(list(marker_dir.glob("session-*"))) == 1,
+                    )
+                    if recorded(private_turn) or any(
+                        row["project"] == "example/unregistered" for row in api.request("projects")
+                    ):
+                        raise RuntimeError("An unregistered project reached the journal")
                     provider.target = {"thread": session, "turn": turn}
                     note_turn = start_turn(codex, session, NOTE_TASK)
                     wait_for(
@@ -655,6 +716,27 @@ def smoke(path, binary, channel, cli):
                         ("add_note", "completed"),
                     ]:
                         raise RuntimeError(f"Codex MCP calls did not complete: {calls}")
+                    wait_for("the final summary to start", provider.note_summary_started.is_set)
+                    codex.call("thread/archive", {"threadId": session})
+                    wait_for(
+                        "the last Codex session to close",
+                        lambda: not any(marker_dir.glob("session-*")),
+                    )
+                    provider.release_note_summary.set()
+                    wait_for(
+                        "the closed session's final summary",
+                        lambda: recorded(note_turn, status="completed", summary=NOTE_SUMMARY),
+                    )
+                    cache = marker_dir.parent / f"observer-{api.cache_key}.sqlite3"
+
+                    def collector_exited():
+                        lock = collector_lock(cache)
+                        if lock is None:
+                            return False
+                        lock.close()
+                        return True
+
+                    wait_for("the collector to stop after the last session", collector_exited)
                 check_clients(path, repo, cli, environment, api, channel)
         finally:
             provider.shutdown()

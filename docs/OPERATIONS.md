@@ -97,13 +97,13 @@ journal.example.com {
 }
 ```
 
-Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then start an observer on each machine. Verify that `agent-journal projects` lists the same registration on both machines and that the browser accepts the token over HTTPS.
+Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then open Codex in that repository on both machines. Verify that `agent-journal projects` lists the same registration on both machines and that the browser accepts the token over HTTPS.
 
 ## Observers
 
-Run one `agent-journal observe` per work machine as the same user that runs Codex. The process needs access to the shared Codex App Server socket and the saved journal connection. Give the observer service the installed Codex and Agent Journal binaries on its PATH.
+The Codex session hooks start the collector as the same user that runs Codex. It needs access to the shared Codex App Server socket and the saved journal connection.
 
-An observer can start before Codex. It retries while the socket or network is unavailable. For unattended use, run the observer in your user service manager with restart on failure. A foreground observer is useful for seeing connection and summary errors during setup.
+For a diagnostic or custom deployment without hooks, run `agent-journal observe` in the foreground or through your user service manager. Give a manually managed collector the installed Codex and Agent Journal executables on its PATH.
 
 ## Backups and restore
 
@@ -117,4 +117,4 @@ agent-journal backup --database /var/lib/agent-journal/journal.sqlite3 --output 
 
 Copy the backup to protected storage. It contains transcripts and notes. To verify it, start a separate test instance against a private copy at a new database path. Check that known turns and notes load. To restore for normal use, point the stopped application service at the verified copy or place it at a new persistent database path and restart the service.
 
-If the access token changes, update the server environment file and restart the service. Run `agent-journal connect` again on each work machine, then restart its observer. Sign in again in the browser.
+If the access token changes, update the server environment file and restart the service. Run `agent-journal connect` again on each work machine. Close any open Codex sessions to let the collector exit, then reopen Codex. Sign in again in the browser.
