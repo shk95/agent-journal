@@ -123,6 +123,8 @@ Run Codex from that repository as usual. In another pane, open the journal with 
 
 ### Automated checks
 
+Run the software tests locally before publishing. GitHub Actions checks the public repository and builds and smoke-checks the Nix packages when preparing a release.
+
 ```sh
 uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
@@ -143,7 +145,7 @@ If Chrome is installed, omit the browser installation command and pass `--browse
 
 ### Local deployment smoke test
 
-Run the installer and rollback test on a **fresh, disposable Linux VM with systemd**. This is the same test used by the server release workflow. A macOS development machine can run it in a local Linux VM. Use a clean checkout of the revision under test, with Nix and Python 3.11 or newer installed inside that VM.
+Run the installer and rollback test on a **fresh, disposable Linux VM with systemd**. A macOS development machine can run it in a local Linux VM. Use a clean checkout of the revision under test, with Nix and Python 3.11 or newer installed inside that VM.
 
 ```sh
 nix build .#server

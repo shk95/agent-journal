@@ -24,18 +24,20 @@ The installer generates the access token in `/etc/agent-journal/server.env`. Sha
 
 An existing manually managed `agent-journal.service` requires a separate migration. Take and verify a backup before changing ownership of the service or moving its database.
 
-## Publish a server release
+## Publish a release
 
-On `master`, set the intended version in `pyproject.toml` and update `uv.lock`. Push a tag that matches that version.
+Run the [local checks](SETUP.md#local-development) before tagging. On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Push a tag that matches that version.
 
 ```sh
-git tag server-v0.2.0
-git push origin server-v0.2.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The release workflow tests startup, updates, and rollback on Linux x86-64 and ARM64. On success it publishes a GitHub Release with a manifest containing the exact commit. Consider enabling [immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) before publishing the first release.
+The release workflow checks the public history, builds the Nix outputs, and verifies their CLI entry points. On success it publishes one GitHub Release for both packages and a server update manifest containing the exact commit. A manual run of the Release workflow verifies packaging without publishing a tag. Consider enabling [immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) before publishing the first release.
 
-The timer checks every 15 minutes and selects a stable `server-v` release newer than the installed package version. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
+Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.2.0#client' -- tui` runs that release's client.
+
+The timer checks every 15 minutes for a stable `vX.Y.Z` release with a server manifest and a version newer than the installed package. It validates the manifest digest and verifies that the Git tag points to the manifest's commit. It builds that commit while the old service is running. A public repository allows the VM to check for updates without GitHub credentials.
 
 For the switch, the updater fences client requests, stops the old process, and snapshots its database into the new deployment. Requests resume after the new process reports the expected deployment ID and a ready database. On failure the updater restores the previous executable and its original database. It records failed revisions so the timer will wait for a corrected release. An interrupted switch is reconciled when the updater runs again.
 
@@ -47,9 +49,18 @@ sudo python3 /opt/agent-journal/server_deploy.py recover
 
 The updater and systemd unit files are installed as host configuration. Replacing those control files requires a reviewed host change. Application releases update the server package and web UI while using the host token and proxy settings. Keep disk space for the candidate and the prior database snapshot. Use independent backups for recovery from storage loss.
 
+If a VM has an updater from the `server-v` tag era, refresh the installed script from a reviewed checkout before publishing the first shared release.
+
+```sh
+sudo systemctl stop agent-journal-update.timer agent-journal-update.service
+sudo install -m 0600 scripts/server_deploy.py /opt/agent-journal/server_deploy.py
+sudo python3 /opt/agent-journal/server_deploy.py recover
+sudo systemctl start agent-journal-update.timer
+```
+
 ## Manual installation
 
-## Server
+### Server
 
 Create a service account called `journal`. Give it read access to the checked-out code or installed package, and exclusive write access to its data directory. Keep the service environment file outside the checkout with permissions `0600`. Put one generated `AGENT_JOURNAL_TOKEN` in that file.
 

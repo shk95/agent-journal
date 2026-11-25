@@ -24,9 +24,10 @@ ROOT = Path("/opt/agent-journal")
 DATA = Path("/var/lib/agent-journal")
 CONFIG = Path("/etc/agent-journal")
 UNIT = "agent-journal.service"
-TAG = re.compile(r"server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[a-f0-9]{40}")
-ID = re.compile(r"(?:server-v[0-9]+\.[0-9]+\.[0-9]+|bootstrap)-[a-f0-9]{12}")
+ID = re.compile(r"(?:(?:server-)?v[0-9]+\.[0-9]+\.[0-9]+|bootstrap)-[a-f0-9]{12}")
+MANIFEST = "server-release.json"
 DOMAIN = re.compile(
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
 )
@@ -68,7 +69,7 @@ def github(path):
 
 
 def version(tag):
-    match = TAG.fullmatch(tag or "")
+    match = TAG.fullmatch((tag or "").removeprefix("server-"))
     return tuple(map(int, match.groups())) if match else (0, 0, 0)
 
 
@@ -81,6 +82,7 @@ def select_release(releases, current):
             and version(item["tag_name"]) > version(current)
             and not item["draft"]
             and not item["prerelease"]
+            and any(asset["name"] == MANIFEST for asset in item["assets"])
         ),
         key=lambda item: version(item["tag_name"]),
         default=None,
@@ -92,14 +94,12 @@ def release_commit(release):
     if not TAG.fullmatch(tag):
         raise ValueError("Invalid server release tag")
     asset = next(
-        (item for item in release["assets"] if item["name"] == "server-release.json"),
+        (item for item in release["assets"] if item["name"] == MANIFEST),
         None,
     )
     if not asset or not asset.get("digest"):
         raise ValueError("Server release manifest or its SHA-256 digest is missing")
-    raw = fetch(
-        f"https://github.com/{REPO}/releases/download/{tag}/server-release.json", 4096
-    )
+    raw = fetch(f"https://github.com/{REPO}/releases/download/{tag}/{MANIFEST}", 4096)
     if asset["digest"] != "sha256:" + hashlib.sha256(raw).hexdigest():
         raise ValueError("Server release manifest failed its digest check")
     manifest = json.loads(raw)
@@ -145,7 +145,7 @@ class Deployment:
         baseline = tag
         if checkout:
             with (checkout / "pyproject.toml").open("rb") as source:
-                baseline = "server-v" + tomllib.load(source)["project"]["version"]
+                baseline = "v" + tomllib.load(source)["project"]["version"]
             if not TAG.fullmatch(baseline):
                 raise ValueError("The server package must have a three-part version")
         identifier = f"{tag or 'bootstrap'}-{commit[:12]}"

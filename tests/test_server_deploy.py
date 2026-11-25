@@ -11,18 +11,24 @@ from urllib.request import Request, urlopen
 
 from scripts.server_deploy import (
     CONFIG,
+    MANIFEST,
     Deployment,
     release_commit,
     select_release,
 )
 
 OLD = "bootstrap-" + "0" * 12
-GOOD = "server-v0.2.0-" + "1" * 12
-BAD = "server-v0.3.0-" + "2" * 12
+GOOD = "v0.2.0-" + "1" * 12
+BAD = "v0.3.0-" + "2" * 12
 
 
-def release(tag, *, prerelease=False):
-    return {"tag_name": tag, "prerelease": prerelease, "draft": False, "assets": []}
+def release(tag, *, prerelease=False, manifest=True):
+    return {
+        "tag_name": tag,
+        "prerelease": prerelease,
+        "draft": False,
+        "assets": [{"name": MANIFEST}] if manifest else [],
+    }
 
 
 class DeploymentTests(unittest.TestCase):
@@ -64,12 +70,13 @@ class DeploymentTests(unittest.TestCase):
     def test_selects_highest_new_server_release(self):
         releases = [
             release("client-v4.0.0"),
-            release("server-v0.10.0"),
-            release("server-v0.9.0"),
-            release("server-v0.11.0", prerelease=True),
+            release("v0.10.0"),
+            release("v0.9.0"),
+            release("v0.11.0", prerelease=True),
+            release("v0.12.0", manifest=False),
         ]
         self.assertEqual(select_release(releases, "server-v0.9.0"), releases[1])
-        self.assertIsNone(select_release(releases, "server-v0.10.0"))
+        self.assertIsNone(select_release(releases, "v0.10.0"))
 
     def test_bootstrap_uses_package_version_as_update_floor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -84,21 +91,16 @@ class DeploymentTests(unittest.TestCase):
             with patch.object(deployment, "create_data_dir"):
                 deployment.prepare("0" * 40, checkout=checkout)
             deployment.point_at(OLD)
-            self.assertEqual(deployment.active()["tag"], "server-v0.9.0")
+            self.assertEqual(deployment.active()["tag"], "v0.9.0")
             self.assertIsNone(
-                select_release([release("server-v0.8.0")], deployment.active()["tag"])
+                select_release([release("v0.8.0")], deployment.active()["tag"])
             )
 
     def test_release_manifest_matches_digest_and_tag(self):
-        entry = release("server-v0.2.0")
+        entry = release("v0.2.0")
         commit = "1" * 40
         body = json.dumps({"commit": commit, "tag": entry["tag_name"]}).encode()
-        entry["assets"].append(
-            {
-                "name": "server-release.json",
-                "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
-            }
-        )
+        entry["assets"][0]["digest"] = "sha256:" + hashlib.sha256(body).hexdigest()
         with (
             patch("scripts.server_deploy.fetch", return_value=body),
             patch(
@@ -189,10 +191,10 @@ def smoke():
                 raise RuntimeError("Intentional health-check failure")
 
         deployment.wait_ready = check
-        deployment.apply(candidate(GOOD, "server-v0.2.0", "1" * 40))
+        deployment.apply(candidate(GOOD, "v0.2.0", "1" * 40))
         add_note("after-update")
         try:
-            deployment.apply(candidate(BAD, "server-v0.3.0", "2" * 40))
+            deployment.apply(candidate(BAD, "v0.3.0", "2" * 40))
         except RuntimeError as error:
             assert str(error) == "Intentional health-check failure"
         else:

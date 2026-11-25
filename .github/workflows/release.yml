@@ -1,50 +1,31 @@
-name: Server release
+name: Release
 on:
   push:
-    branches: [master]
-    tags: ["server-v*"]
-  pull_request:
-    branches: [master]
-    paths:
-      - flake.nix
-      - flake.lock
-      - uv.lock
-      - pyproject.toml
-      - "src/**"
-      - "deploy/**"
-      - "scripts/server_deploy.py"
-      - "tests/test_server_deploy.py"
-      - ".github/workflows/server-release.yml"
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  server:
+  public:
+    uses: ./.github/workflows/checks.yml
+
+  packages:
     strategy:
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-        if: matrix.runner == 'ubuntu-24.04'
-        with:
-          version: "0.13.9"
-          python-version: "3.13"
-      - run: uv run --locked python -m unittest discover -s tests -v
-        if: matrix.runner == 'ubuntu-24.04'
-      - run: nix build .#server
-      - run: sudo python3 scripts/server_deploy.py install
-      - run: systemctl is-active agent-journal-update.timer && sudo systemctl stop agent-journal-update.timer
-      - run: sudo python3 -m tests.test_server_deploy smoke
+      - run: nix flake check
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/server-v')
-    needs: server
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [public, packages]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -61,19 +42,20 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import re
           import subprocess
           import tomllib
           with open("pyproject.toml", "rb") as source:
               version = tomllib.load(source)["project"]["version"]
           tag = os.environ["RELEASE_TAG"]
-          if tag != "server-v" + version:
+          if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) or tag != "v" + version:
               raise SystemExit("The tag must match the version in pyproject.toml")
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           with open("server-release.json", "w") as output:
               json.dump({"tag": tag, "commit": commit}, output)
           PY
-      - name: Publish the server release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" server-release.json --verify-tag --title "$RELEASE_TAG" --generate-notes --latest=false
+        run: gh release create "$RELEASE_TAG" server-release.json --verify-tag --title "$RELEASE_TAG" --generate-notes

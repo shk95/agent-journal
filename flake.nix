@@ -92,13 +92,24 @@
 
       checks = forSystems (
         system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
         {
-          client = nixpkgs.legacyPackages.${system}.runCommand "agent-journal-client-check" { } ''
+          client = pkgs.runCommand "agent-journal-client-check" { } ''
             client="${self.packages.${system}.client}/bin/agent-journal"
             "$client" --help
             "$client" tui --help
             "$client" observe --help
             "$client" mcp --help
+            touch "$out"
+          '';
+        }
+        // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
+          server = pkgs.runCommand "agent-journal-server-check" { } ''
+            server="${self.packages.${system}.server}/bin/agent-journal"
+            "$server" serve --help
+            "$server" backup --help
             touch "$out"
           '';
         }
