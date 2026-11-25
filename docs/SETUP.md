@@ -2,15 +2,31 @@
 
 ## Install
 
+### Standalone client
+
+Install the latest stable release on Apple Silicon macOS, Linux x86-64, or Linux ARM64. The client bundles Python and its Python dependencies. The Linux builds require glibc 2.35 or later.
+
+```sh
+installer=$(mktemp)
+curl -fsSL --proto '=https' \
+  https://github.com/shk95/agent-journal/releases/latest/download/install-client.sh \
+  -o "$installer" && sh "$installer"
+rm -f "$installer"
+```
+
+The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.2.0` to the installer to select a specific version. Run the installer again to upgrade.
+
+For agent-assisted setup, give the agent the Agent Journal repository URL and ask it to follow this section on the work machine. If Codex is on PATH, the installer sets its user-level `journal` MCP entry to the installed binary's absolute path. Restart Codex and complete [the first server connection](#connect-a-work-machine) using the server URL and token. Use a signed-in Codex CLI for observation and summaries and a signed-in GitHub CLI for project registration. Git identifies the current checkout.
+
 ### Nix client
 
 The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (`x86_64-linux`), and Linux ARM64 (`aarch64-linux`). Enable flakes on the work machine before installing.
 
 ```sh
-nix profile add 'github:shk95/agent-journal#client'
+nix profile add 'github:shk95/agent-journal/v0.2.0#client'
 ```
 
-Older Nix versions use `nix profile install`. To run the client directly, use `nix run 'github:shk95/agent-journal#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
+Older Nix versions use `nix profile install`. Substitute the desired release tag to pin a different version. To run the client directly, use `nix run 'github:shk95/agent-journal/v0.2.0#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
 
 The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and summaries use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
 
@@ -47,7 +63,7 @@ If you start from Codex, the first journal tool call prompts you to run this com
 
 The TUI, local MCP tools, and observer use the same saved connection on each work machine. The `AGENT_JOURNAL_HOME` environment variable selects a different state directory. For service managers and temporary tests, `AGENT_JOURNAL_TOKEN` and `AGENT_JOURNAL_URL` override saved settings.
 
-Install the [Codex MCP entry](#set-up-codex) and ask Codex to register the repository with Agent Journal. Start one observer per work machine to collect turns.
+If you installed with Nix or from source, set up the [Codex MCP entry](#set-up-codex). Ask Codex to register the repository with Agent Journal. Start one observer per work machine to collect turns.
 
 ```sh
 agent-journal observe
@@ -87,7 +103,7 @@ Collection uses the shared Codex App Server. Use `observe --socket PATH` for a d
 
 ## Set up Codex
 
-Add the local MCP interface to your user-level Codex configuration once per work machine. Restart Codex after changing the configuration.
+The standalone installer sets up the local MCP interface when Codex is available. For a manual setup, add it to your user-level configuration once per work machine. Restart Codex after changing the configuration.
 
 ```sh
 codex mcp add journal -- agent-journal mcp
@@ -159,13 +175,21 @@ uv run --locked --with playwright==1.65.2 python -m tests.smoke_local
 
 If Chrome is installed, omit the browser installation command and pass `--browser-channel chrome` to the smoke test. Use `--codex PATH` to select a compatible Codex binary.
 
+To exercise the standalone client through the same flow, build the bundle and pass its executable path. On Linux, use the release build container to target the same glibc baseline as the published assets.
+
+```sh
+uv run --locked --managed-python --python 3.13 --group bundle python scripts/build_client.py
+uv run --locked --with playwright==1.65.2 python -m tests.smoke_local \
+  --client dist/agent-journal-macos-arm64 --browser-channel chrome
+```
+
 ### Local deployment smoke test
 
 Run the installer and rollback test on a **fresh, disposable Linux VM with systemd**. A macOS development machine can run it in a local Linux VM. Use a clean checkout of the revision under test, with Nix and Python 3.11 or newer installed inside that VM.
 
 ```sh
 nix build .#server
-sudo python3 scripts/server_deploy.py install
+sudo python3 scripts/server_deploy.py install --local
 systemctl is-active agent-journal-update.timer
 sudo systemctl stop agent-journal-update.timer agent-journal-update.service
 sudo python3 -m tests.test_server_deploy smoke

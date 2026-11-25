@@ -23,9 +23,52 @@ jobs:
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
       - run: nix flake check
 
+  clients:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-15
+            target: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        if: runner.os == 'macOS'
+        with:
+          version: "0.13.9"
+      - name: Build the macOS client
+        if: runner.os == 'macOS'
+        run: uv run --locked --managed-python --python 3.13 --group bundle python scripts/build_client.py
+      - name: Build the Linux client
+        if: runner.os == 'Linux'
+        run: |
+          docker build -f scripts/client-build.Dockerfile -t agent-journal-client .
+          docker run --rm -v "$PWD:/workspace" -w /workspace agent-journal-client \
+            uv run --locked --managed-python --python 3.13 --group bundle python scripts/build_client.py
+      - name: Verify the standalone client
+        env:
+          CLIENT: dist/agent-journal-${{ matrix.target }}
+        run: |
+          "$CLIENT" --version
+          "$CLIENT" tui --help
+          "$CLIENT" observe --help
+          "$CLIENT" mcp </dev/null
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: client-${{ matrix.target }}
+          path: dist/agent-journal-${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
+
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [public, packages]
+    needs: [public, packages, clients]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -54,8 +97,21 @@ jobs:
           with open("server-release.json", "w") as output:
               json.dump({"tag": tag, "commit": commit}, output)
           PY
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: client-*
+          path: release-assets
+          merge-multiple: true
+      - name: Checksum the client assets
+        working-directory: release-assets
+        run: |
+          sha256sum agent-journal-macos-arm64 agent-journal-linux-x86_64 agent-journal-linux-arm64 > client-sha256sums.txt
+          cp ../scripts/install-client.sh .
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" server-release.json --verify-tag --title "$RELEASE_TAG" --generate-notes
+        run: |
+          gh release create "$RELEASE_TAG" server-release.json release-assets/* \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes \
+            --notes "[Client installation](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/SETUP.md) · [Server installation](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/OPERATIONS.md)"

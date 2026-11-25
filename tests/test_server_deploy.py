@@ -13,6 +13,7 @@ from scripts.server_deploy import (
     CONFIG,
     MANIFEST,
     Deployment,
+    install_release,
     release_commit,
     select_release,
 )
@@ -77,6 +78,25 @@ class DeploymentTests(unittest.TestCase):
         ]
         self.assertEqual(select_release(releases, "server-v0.9.0"), releases[1])
         self.assertIsNone(select_release(releases, "v0.10.0"))
+
+    def test_bootstrap_selects_a_published_stable_release(self):
+        stable = release("v0.2.0")
+        preview = release("v0.3.0", prerelease=True)
+        with (
+            patch(
+                "scripts.server_deploy.github",
+                side_effect=[[preview, stable], stable, preview],
+            ) as github,
+            patch(
+                "scripts.server_deploy.release_commit", return_value="1" * 40
+            ) as commit,
+        ):
+            self.assertEqual(install_release(None), ("v0.2.0", "1" * 40))
+            self.assertEqual(install_release("v0.2.0"), ("v0.2.0", "1" * 40))
+            with self.assertRaisesRegex(ValueError, "No published stable"):
+                install_release("v0.3.0")
+            github.assert_any_call("/releases/tags/v0.2.0")
+            commit.assert_called_with(stable)
 
     def test_bootstrap_uses_package_version_as_update_floor(self):
         with tempfile.TemporaryDirectory() as directory:

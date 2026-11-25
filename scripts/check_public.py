@@ -26,6 +26,8 @@ SOURCE_FILES = (
     "src/agent_journal/static/*.css",
     "tests/*.py",
     "scripts/*.py",
+    "scripts/client-build.Dockerfile",
+    "scripts/install-client.sh",
     "docs/*.md",
     "deploy/*.service",
     "deploy/*.timer",

@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 from .common import Api, ConnectionRequired, local_repo, repo_key, state_dir
@@ -53,6 +54,9 @@ def main():
     p = argparse.ArgumentParser(
         prog="agent-journal",
         description="Open the terminal journal for the current GitHub checkout.",
+    )
+    p.add_argument(
+        "--version", action="version", version=f"%(prog)s {version('agent-journal')}"
     )
     commands = p.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve")

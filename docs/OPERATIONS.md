@@ -1,21 +1,24 @@
 # Cloud operations
 
-Run the central server on a Linux VM with a persistent volume and an HTTPS reverse proxy. The examples use systemd and Caddy. Install Agent Journal from a reviewed Git revision before creating the service.
+Run the central server on a Linux VM with a persistent volume and an HTTPS reverse proxy. The examples use systemd and Caddy. Use a published stable release for the application and the initial host configuration.
 
 ## Managed installation
 
-Use a Linux VM with a running systemd instance, Git, Python 3.11 or newer, and a working Nix installation. The installer needs sudo. For managed HTTPS, install Caddy, point a public hostname at the VM, and leave ports 80 and 443 available for the journal proxy.
+Use a Linux VM with a running systemd instance, Git, curl, Python 3.11 or newer, and a working Nix installation. The installer needs sudo. For managed HTTPS, install Caddy, point a public hostname at the VM, and leave ports 80 and 443 available for the journal proxy.
 
 ```sh
-git clone https://github.com/shk95/agent-journal.git
+release_url=$(curl -fsSL --proto '=https' -o /dev/null -w '%{url_effective}' https://github.com/shk95/agent-journal/releases/latest)
+release_tag=${release_url##*/}
+git clone --branch "$release_tag" https://github.com/shk95/agent-journal.git
 cd agent-journal
-sudo python3 scripts/server_deploy.py install --domain journal.example.com
+sudo python3 scripts/server_deploy.py install --release "$release_tag" --domain journal.example.com
 ```
 
-Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer builds the checkout's `#server` package, starts the journal, and enables the release timer. Verify the public HTTPS address after installation and confirm that the local health check identifies the running deployment.
+Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer verifies the release manifest and tag, builds the released commit's `#server` package, starts the journal, and enables the release timer. Without `--release`, it selects the newest published stable server release. Use `--local` for the disposable VM test in [local development](SETUP.md#local-deployment-smoke-test).
 
 ```sh
 curl -f http://127.0.0.1:8765/healthz
+curl -f https://journal.example.com/healthz
 systemctl status agent-journal.service
 systemctl list-timers agent-journal-update.timer
 ```
@@ -33,7 +36,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The release workflow checks the public history, builds the Nix outputs, and verifies their CLI entry points. On success it publishes one GitHub Release for both packages and a server update manifest containing the exact commit. A manual run of the Release workflow verifies packaging without publishing a tag. Consider enabling [immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) before publishing the first release.
+The release workflow checks the public history and verifies the Nix outputs and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
 Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.2.0#client' -- tui` runs that release's client.
 

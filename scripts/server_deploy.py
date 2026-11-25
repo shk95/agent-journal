@@ -79,7 +79,7 @@ def select_release(releases, current):
             item
             for item in releases
             if TAG.fullmatch(item["tag_name"])
-            and version(item["tag_name"]) > version(current)
+            and (current is None or version(item["tag_name"]) > version(current))
             and not item["draft"]
             and not item["prerelease"]
             and any(asset["name"] == MANIFEST for asset in item["assets"])
@@ -87,6 +87,28 @@ def select_release(releases, current):
         key=lambda item: version(item["tag_name"]),
         default=None,
     )
+
+
+def latest_release(current=None):
+    releases = []
+    for page in range(1, 11):
+        batch = github(f"/releases?per_page=100&page={page}")
+        releases.extend(batch)
+        if len(batch) < 100:
+            break
+    return select_release(releases, current)
+
+
+def install_release(tag):
+    if tag is None:
+        release = latest_release()
+    else:
+        if not TAG.fullmatch(tag):
+            raise ValueError("Use a stable release tag in the form vX.Y.Z")
+        release = select_release([github("/releases/tags/" + tag)], None)
+    if release is None:
+        raise ValueError("No published stable server release found")
+    return release["tag_name"], release_commit(release)
 
 
 def release_commit(release):
@@ -269,13 +291,7 @@ class Deployment:
         active = self.active()
         if not active:
             raise RuntimeError("Install Agent Journal before checking for updates")
-        releases = []
-        for page in range(1, 11):
-            batch = github(f"/releases?per_page=100&page={page}")
-            releases.extend(batch)
-            if len(batch) < 100:
-                break
-        release = select_release(releases, active["tag"])
+        release = latest_release(active["tag"])
         if release is None:
             print("No newer server release.")
             return
@@ -299,7 +315,7 @@ def find_nix():
     raise RuntimeError("Install Nix before deploying Agent Journal")
 
 
-def install(deployment, domain):
+def install(deployment, domain, tag=None, local=False):
     checkout = Path(__file__).resolve().parents[1]
     if not Path("/run/systemd/system").is_dir():
         raise RuntimeError("A running systemd instance is required")
@@ -311,7 +327,10 @@ def install(deployment, domain):
         )
     if output("git", "-C", str(checkout), "status", "--porcelain"):
         raise RuntimeError("Install from a clean checkout of a reviewed revision")
-    commit = output("git", "-C", str(checkout), "rev-parse", "HEAD")
+    if local:
+        commit = output("git", "-C", str(checkout), "rev-parse", "HEAD")
+    else:
+        tag, commit = install_release(tag)
     nix = find_nix()
     proxy = shutil.which("caddy") if domain else None
     if domain and not proxy:
@@ -350,7 +369,9 @@ def install(deployment, domain):
     deployment.data.chmod(0o711)
     units = Path("/etc/systemd/system")
     with deployment.lock():
-        identifier = deployment.prepare(commit, checkout=checkout)
+        identifier = deployment.prepare(
+            commit, tag, checkout=checkout if local else None
+        )
         for name in (
             UNIT,
             "agent-journal-update.service",
@@ -388,7 +409,15 @@ def install_proxy(binary, domain, checkout, units):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("install").add_argument("--domain")
+    installer = commands.add_parser("install")
+    installer.add_argument("--domain")
+    source = installer.add_mutually_exclusive_group()
+    source.add_argument(
+        "--release", metavar="vX.Y.Z", help="install a specific stable release"
+    )
+    source.add_argument(
+        "--local", action="store_true", help="install from the checkout for testing"
+    )
     commands.add_parser("update")
     commands.add_parser("recover")
     args = parser.parse_args()
@@ -398,7 +427,7 @@ def main():
     deployment = Deployment()
     try:
         if args.command == "install":
-            install(deployment, args.domain)
+            install(deployment, args.domain, args.release, args.local)
         else:
             with deployment.lock():
                 getattr(deployment, args.command)()

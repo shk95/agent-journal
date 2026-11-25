@@ -465,8 +465,7 @@ def check_clients(path, repo, cli, env, api, channel):
         subprocess.run(tmux + ["kill-server"], check=False, capture_output=True)
 
 
-def smoke(path, binary, channel):
-    cli = Path(sys.executable).with_name("agent-journal")
+def smoke(path, binary, channel, cli):
     repo = path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -530,13 +529,12 @@ def smoke(path, binary, channel):
             config = provider_config(f"http://127.0.0.1:{provider.server_port}/v1")
             runtime = path / "codex-state"
             runtime.mkdir()
+            environment["CODEX_HOME"] = str(runtime)
             local_config = config + [
                 "-c",
                 "sqlite_home=" + json.dumps(str(runtime)),
                 "-c",
                 "log_dir=" + json.dumps(str(runtime)),
-                "-c",
-                "mcp_servers={}",
             ]
             mcp_args = ["mcp", "--socket", str(rpc)]
             for key, value in {
@@ -597,6 +595,13 @@ def smoke(path, binary, channel):
                         "sandbox": "read-only",
                     }
                     registration = codex.call("thread/start", options)["thread"]["id"]
+                    servers = codex.call("mcpServerStatus/list", {"limit": 100})["data"]
+                    if not any(
+                        server["name"] == "journal"
+                        and "register_project" in server["tools"]
+                        for server in servers
+                    ):
+                        raise RuntimeError("Codex did not load the journal MCP tools")
                     start_turn(codex, registration, REGISTER_TASK)
                     wait_for(
                         "project registration through Codex",
@@ -663,12 +668,18 @@ def main():
     parser.add_argument(
         "--browser-channel", choices=("chrome",), help="Use an installed Chrome"
     )
+    parser.add_argument(
+        "--client",
+        type=Path,
+        default=Path(sys.executable).with_name("agent-journal"),
+        help="Agent Journal executable to exercise",
+    )
     args = parser.parse_args()
     binary = shutil.which(args.codex)
     if not binary or not shutil.which("tmux") or not shutil.which("git"):
         parser.error("Install Codex CLI, tmux, and Git before running the smoke test")
     with tempfile.TemporaryDirectory(prefix="aj-smoke-", dir="/tmp") as directory:
-        smoke(Path(directory), binary, args.browser_channel)
+        smoke(Path(directory), binary, args.browser_channel, args.client.resolve())
     print("Local Codex, summary, observer, MCP, TUI, and browser smoke test passed.")
 
 
