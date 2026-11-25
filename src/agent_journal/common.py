@@ -7,8 +7,23 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 PROJECT = re.compile(r"[a-z0-9][a-z0-9-]*/[a-z0-9_.-]+", re.IGNORECASE)
+OBSERVATION_LEASE = 45
+OBSERVATION_REFRESH = 15
+
+
+def turn_start(turn, started):
+    """Use the ID timestamp only when it agrees with the Codex start second."""
+    try:
+        identifier = UUID(turn)
+    except (ValueError, TypeError, AttributeError):
+        return started
+    millis = identifier.int >> 80
+    if identifier.version == 7 and millis // 1000 == started:
+        return millis / 1000
+    return started
 
 
 def state_dir():

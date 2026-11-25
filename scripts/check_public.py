@@ -63,20 +63,33 @@ def check(revisions):
                 "show", "-s", "--format=%ae%x00%ce%x00%aI%x00%cI%x00%B", revision
             ).split(b"\0", 4)
             if not all(NOREPLY.fullmatch(value) for value in (author, committer)):
-                failures.add(f"{revision[:12]}: use noreply author and committer emails")
-            if not all(value.endswith((b"Z", b"+00:00")) for value in (author_date, commit_date)):
+                failures.add(
+                    f"{revision[:12]}: use noreply author and committer emails"
+                )
+            if not all(
+                value.endswith((b"Z", b"+00:00"))
+                for value in (author_date, commit_date)
+            ):
                 failures.add(f"{revision[:12]}: use UTC commit dates")
             if LOCAL_VALUE.search(message):
-                failures.add(f"{revision[:12]}: review a local value in the commit message")
+                failures.add(
+                    f"{revision[:12]}: review a local value in the commit message"
+                )
         for mode, oid, raw_name in entries(revision):
             name = raw_name.decode(errors="replace")
             path = PurePosixPath(name)
-            if mode not in (b"100644", b"100755") or not (
-                name in ROOT_FILES or any(
-                    name.count("/") == item.count("/") and fnmatch.fnmatchcase(name, item)
-                    for item in SOURCE_FILES
+            if (
+                mode not in (b"100644", b"100755")
+                or not (
+                    name in ROOT_FILES
+                    or any(
+                        name.count("/") == item.count("/")
+                        and fnmatch.fnmatchcase(name, item)
+                        for item in SOURCE_FILES
+                    )
                 )
-            ) or any(part.startswith(".") for part in path.parts[1:]):
+                or any(part.startswith(".") for part in path.parts[1:])
+            ):
                 failures.add(f"{name!r}: outside the public file inventory")
                 continue
             if oid in checked:
@@ -99,7 +112,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", action="store_true")
     args = parser.parse_args()
-    revisions = git("rev-list", "refs/heads/master").decode().split() if args.history else [None]
+    revisions = (
+        git("rev-list", "refs/heads/master").decode().split()
+        if args.history
+        else [None]
+    )
     failures = check(revisions)
     if failures:
         print("\n".join(sorted(failures)), file=sys.stderr)

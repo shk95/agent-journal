@@ -10,6 +10,7 @@ STATE = {
     "interrupted": "Interrupted",
     "failed": "Failed",
 }
+OBSERVATION = {"unavailable": "Observer offline", "stopped": "Recording stopped"}
 
 
 def fit(text, n):
@@ -84,7 +85,8 @@ def show(win, api, project):
             split = w * weights[0] // total
             second = w * sum(weights[:2]) // total
             for enabled, (x, label) in zip(
-                visible, [(0, "Journey"), (split, "Turn notes"), (second, "Project notes")]
+                visible,
+                [(0, "Journey"), (split, "Turn notes"), (second, "Project notes")],
             ):
                 if not enabled:
                     continue
@@ -106,9 +108,8 @@ def show(win, api, project):
                     split - 1,
                     style,
                 )
-                write(
-                    win, y + 1, 2, f"{STATE[r['status']]} · {r['summary']}", split - 3
-                )
+                status = OBSERVATION.get(r.get("observation"), STATE[r["status"]])
+                write(win, y + 1, 2, f"{status} · {r['summary']}", split - 3)
                 attached = [
                     n["body"]
                     for n in notes

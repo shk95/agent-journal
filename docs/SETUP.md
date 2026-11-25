@@ -52,11 +52,11 @@ Use `agent-journal projects` to see the registration state. Use `agent-journal d
 
 ## Collection and summaries
 
-The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The registration cutoff is rounded up to the next whole second to match Codex turn timestamps. Turning collection back on sets a fresh cutoff.
+The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The observer recovers subsecond start times from Codex turn IDs when available. Older records with second-only timestamps have a conservative cutoff. Turning collection back on sets a fresh cutoff.
 
 The observer sends transcripts and a preliminary summary first. A separate worker runs a read-only, ephemeral `codex exec` in a temporary directory to generate an English summary. This uses model capacity. Set `AGENT_JOURNAL_SUMMARY_MODEL` to select a summary model. The preliminary summary remains visible while a failed generation waits for retry.
 
-During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
+During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The clients show when the observer loses contact with a previously running turn or recording stops for the project. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
 
 Collection uses the shared Codex App Server. Use `observe --socket PATH` for a different server socket. The [release plan](../RELEASE_PLAN.md) tracks MCP integration and selective import of older sessions.
 

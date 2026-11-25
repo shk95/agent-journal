@@ -1,6 +1,6 @@
 # Agent Journal repository instructions
 
-- Keep server, client, web, and tests in this repository. Run the checks listed in README before committing.
+- Keep server, client, web, and tests in this repository. Run the checks in `docs/SETUP.md` before committing.
 - Use English by default for product UI, generated summaries, diagnostics, source comments, repository documentation, and Git messages. Preserve the original language of transcripts and user-authored notes.
 - Use `master` as the default branch.
 - Treat every tracked file, commit message, commit identity, issue, and PR as public. Use a GitHub noreply address for both author and committer.

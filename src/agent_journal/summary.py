@@ -133,7 +133,7 @@ def work_once(db, summarize=generate):
         if row and row[0] == digest:
             record = json.loads(raw)
             revision = max(time.time_ns() // 1000, row[1] + 1)
-            record.update(revision=revision, summary=summary)
+            record.update(revision=revision, summary=summary, observed=False)
             db.execute(
                 "UPDATE snapshots SET revision=?,pending=? WHERE project=? AND thread=? AND turn=?",
                 (revision, json.dumps(record, ensure_ascii=False), *key),

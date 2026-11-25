@@ -11,7 +11,7 @@ from pathlib import Path
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import unix_connect
 
-from .common import local_repo, repo_key
+from .common import OBSERVATION_REFRESH, local_repo, repo_key, turn_start
 from .summary import evidence
 
 
@@ -102,6 +102,7 @@ class Cache:
     def __init__(self, path):
         self.db = sqlite3.connect(path, timeout=10)
         self.scanned = {}
+        self.heartbeats = {}
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS registry(project TEXT PRIMARY KEY,since INTEGER);
@@ -134,6 +135,10 @@ class Cache:
         data = json.dumps(record, ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(data.encode()).hexdigest()
         key = tuple(record[k] for k in ("project", "thread", "turn"))
+        if record["status"] == "inProgress":
+            self.heartbeats.setdefault(key, 0)
+        else:
+            self.heartbeats.pop(key, None)
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             row = self.db.execute(
@@ -162,7 +167,7 @@ class Cache:
                     ),
                 )
 
-    def flush(self, api):
+    def flush(self, api, active=()):
         for project, thread, turn, rev, body in self.db.execute(
             "SELECT project,thread,turn,revision,pending FROM snapshots WHERE pending IS NOT NULL ORDER BY revision"
         ).fetchall():
@@ -173,19 +178,31 @@ class Cache:
                                    WHERE project=? AND thread=? AND turn=? AND revision=?""",
                     (project, thread, turn, rev),
                 )
+        now = time.monotonic()
+        self.heartbeats = {
+            key: sent for key, sent in self.heartbeats.items() if key in active
+        }
+        for project, thread, turn in active:
+            key = (project, thread, turn)
+            if now - self.heartbeats.get(key, 0) >= OBSERVATION_REFRESH:
+                api.request(
+                    "observe-turn", {"project": project, "thread": thread, "turn": turn}
+                )
+                self.heartbeats[key] = now
 
 
 def scan(rpc, cache):
+    active = set()
     registered = dict(cache.db.execute("SELECT project,since FROM registry"))
     if not registered:
-        return
+        return active
     oldest = min(registered.values())
     for page in rpc.pages(
         "thread/list", {"sortKey": "updated_at", "sortDirection": "desc", "limit": 60}
     ):
         for thread in page:
-            if thread["updatedAt"] < oldest:
-                return
+            if thread["updatedAt"] < int(oldest):
+                return active
             origin = (thread.get("gitInfo") or {}).get("originUrl")
             project = (
                 repo_key(origin)
@@ -204,14 +221,17 @@ def scan(rpc, cache):
                 )
                 if settled and cache.scanned.get(thread["id"]) == stamp:
                     continue
-                stable = scan_thread(rpc, cache, thread, project, registered[project])
+                stable = scan_thread(
+                    rpc, cache, thread, project, registered[project], active
+                )
                 if stable and settled and time.time() - thread["updatedAt"] > 5:
                     cache.scanned[thread["id"]] = stamp
             except RuntimeError as e:
                 print(f"Thread {thread['id']}: {e}", file=sys.stderr)
+    return active
 
 
-def scan_thread(rpc, cache, thread, project, since):
+def scan_thread(rpc, cache, thread, project, since, active=None):
     thread_id = thread["id"]
     args = {
         "threadId": thread_id,
@@ -227,7 +247,7 @@ def scan_thread(rpc, cache, thread, project, since):
             args | {"threadId": parent, "itemsView": "notLoaded", "limit": 100},
         ):
             inherited.update(row["id"] for row in page)
-            if any((row.get("startedAt") or 0) < since for row in page):
+            if any((row.get("startedAt") or 0) < int(since) for row in page):
                 break
     stable = True
     for page in rpc.pages("thread/turns/list", args):
@@ -235,8 +255,10 @@ def scan_thread(rpc, cache, thread, project, since):
             started = turn.get("startedAt")
             if started is None:
                 continue
-            if started < since:
+            if started < int(since):
                 return stable
+            if turn_start(turn["id"], started) < since:
+                continue
             items = turn.get("items", [])
             if turn["id"] in inherited or not any(
                 x["type"] == "userMessage" for x in items
@@ -248,10 +270,12 @@ def scan_thread(rpc, cache, thread, project, since):
                 continue
             if status not in ("completed", "failed", "interrupted", "inProgress"):
                 continue
+            if status == "inProgress" and active is not None:
+                active.add((project, thread_id, turn["id"]))
             previous = None
             if index + 1 < len(page):
                 prior = page[index + 1]
-                if (prior.get("startedAt") or 0) >= since:
+                if turn_start(prior["id"], prior.get("startedAt") or 0) >= since:
                     previous = {
                         "request": short(request_text(prior.get("items", [])), 400),
                         "answer": summarize(prior.get("items", []), prior["status"]),
@@ -276,17 +300,18 @@ def scan_thread(rpc, cache, thread, project, since):
 def observe(api, cache, socket, interval, once):
     while True:
         errors = []
+        active = set()
         try:
             cache.refresh(api.request("projects"))
         except (OSError, RuntimeError, ValueError, WebSocketException) as e:
             errors.append(f"Project registry: {e}")
         try:
             with closing(Codex(socket)) as rpc:
-                scan(rpc, cache)
+                active = scan(rpc, cache)
         except (OSError, RuntimeError, ValueError, WebSocketException) as e:
             errors.append(f"Codex: {e}")
         try:
-            cache.flush(api)
+            cache.flush(api, active)
         except (OSError, RuntimeError, ValueError, WebSocketException) as e:
             errors.append(f"Sync: {e}")
         if errors:

@@ -1,6 +1,7 @@
 """Run an isolated loopback journal for local development."""
 
 import argparse
+import math
 import os
 import secrets
 import subprocess
@@ -43,11 +44,14 @@ def seed():
                 "turn": turn,
                 "parent": parent,
                 "parent_turn": "01" if parent else None,
-                "started": project["since"] + index,
+                "started": math.ceil(project["since"]) + index,
                 "prompt": prompt,
                 "summary": summary,
                 "items": [
-                    {"type": "userMessage", "content": [{"type": "text", "text": prompt}]},
+                    {
+                        "type": "userMessage",
+                        "content": [{"type": "text", "text": prompt}],
+                    },
                     {"type": "agentMessage", "text": summary},
                 ],
                 "status": "completed",
@@ -55,7 +59,12 @@ def seed():
             },
         )
     for note in (
-        {"id": "fixture-turn-note", "thread": "review", "turn": "02", "body": "Check blank lines too."},
+        {
+            "id": "fixture-turn-note",
+            "thread": "review",
+            "turn": "02",
+            "body": "Check blank lines too.",
+        },
         {"id": "fixture-project-note", "body": "Keep the import examples short."},
     ):
         api.request("notes", {"project": FIXTURE, **note})
@@ -85,7 +94,11 @@ def main():
     elif args.command == "token":
         print(env["AGENT_JOURNAL_TOKEN"])
     else:
-        cli = ["serve", "--port", str(args.port)] if args.command == "serve" else args.args
+        cli = (
+            ["serve", "--port", str(args.port)]
+            if args.command == "serve"
+            else args.args
+        )
         executable = Path(sys.executable).with_name("agent-journal")
         return subprocess.call([executable, *cli])
     return 0

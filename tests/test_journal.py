@@ -5,8 +5,9 @@ import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
-from agent_journal.common import Api, repo_key
+from agent_journal.common import OBSERVATION_LEASE, Api, repo_key
 from agent_journal.observer import Cache, scan
 from agent_journal.server import make_server
 from agent_journal.summary import work_once
@@ -177,6 +178,47 @@ class TestJournal(unittest.TestCase):
             pass
         self.cache.flush(self.api)
         self.assertEqual(self.rows()[0]["summary"], "latest summary")
+
+    def test_registration_between_requests_in_one_second(self):
+        second = int(self.since) + 5
+        self.api.request("disable", {"project": "test/p"})
+        with patch("agent_journal.server.time.time", return_value=second + 0.25):
+            self.api.request("register", {"project": "test/p"})
+        self.cache.refresh(self.api.request("projects"))
+
+        def turn_id(offset):
+            return str(
+                UUID(int=((second * 1000 + offset) << 80) | (7 << 76) | (2 << 62))
+            )
+
+        self.source.now = second
+        self.source.turns["a"] = [
+            turn(turn_id(100), second, "before registration"),
+            turn(turn_id(700), second, "after registration"),
+        ]
+        self.source.turns["b"] = []
+        self.cache.flush(self.api, scan(self.source, self.cache))
+        self.assertEqual([r["turn"] for r in self.rows()], [turn_id(700)])
+
+    def test_connection_loss_recovery_and_disable_status(self):
+        live = turn("live", self.since + 1, "verify", status="inProgress")
+        self.source.turns["a"].append(live)
+        project = {"project": "test/p"}
+
+        def latest():
+            return next(r for r in self.rows() if r["turn"] == "live")
+
+        self.cache.flush(self.api, scan(self.source, self.cache))
+        self.assertEqual(latest()["observation"], "observed")
+        with patch(
+            "agent_journal.server.time.time",
+            return_value=self.since + OBSERVATION_LEASE + 5,
+        ):
+            self.assertEqual(latest()["observation"], "unavailable")
+            self.api.request("observe-turn", project | {"thread": "a", "turn": "live"})
+            self.assertEqual(latest()["observation"], "observed")
+        self.api.request("disable", project)
+        self.assertEqual(latest()["observation"], "stopped")
 
     def test_invalid_token(self):
         self.api.token = "invalid"

@@ -6,6 +6,13 @@ const labels = {
   interrupted: "Interrupted",
   failed: "Failed",
 };
+function statusLabel(row) {
+  if (row.status === "inProgress" && row.observation === "unavailable")
+    return "Observer offline";
+  if (row.status === "inProgress" && row.observation === "stopped")
+    return "Recording stopped";
+  return labels[row.status];
+}
 const axes = ["Journey", "Turn notes", "Project notes"];
 const visible = new Set(axes);
 const colors = ["#24794e", "#735995", "#a76135", "#397e93", "#8e5764"];
@@ -101,7 +108,7 @@ function overview(entries) {
       left = node("div"),
       right = node("div");
     left.append(projectLink(p.project));
-    const live = rows.filter((r) => r.status === "inProgress");
+    const live = rows.filter((r) => statusLabel(r) === labels.inProgress);
     left.append(
       node(
         "div",
@@ -186,7 +193,7 @@ function board(project, rows, notes) {
         mark,
         node("span", time),
         node("span", r.thread.slice(-6)),
-        node("span", labels[r.status], r.status === "inProgress" ? "live" : ""),
+        node("span", statusLabel(r), statusLabel(r) === labels.inProgress ? "live" : ""),
       );
       if (r.parent && firstRow.get(r.thread) === i)
         meta.append(node("span", "↳ " + r.parent.slice(-6)));

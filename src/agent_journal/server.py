@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-import math
 import secrets
 import sqlite3
 import time
@@ -11,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .common import PROJECT
+from .common import OBSERVATION_LEASE, PROJECT, turn_start
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -45,6 +44,32 @@ def listing(db, sql, values=()):
     return [dict(row) for row in db.execute(sql, values)]
 
 
+def journey(db, project):
+    rows = listing(
+        db,
+        """SELECT thread,turn,parent,started,status,prompt,summary,updated,since,active
+           FROM turns JOIN projects USING(project) WHERE project=?
+           ORDER BY started,turn,thread""",
+        (project,),
+    )
+    now = time.time()
+    for row in rows:
+        updated, since, active = (
+            row.pop(key) for key in ("updated", "since", "active")
+        )
+        if row["status"] == "inProgress":
+            if not active or turn_start(row["turn"], row["started"]) < since:
+                row["observation"] = "stopped"
+            elif updated is None or updated < now - OBSERVATION_LEASE:
+                row["observation"] = "unavailable"
+            else:
+                row["observation"] = "observed"
+    return sorted(
+        rows,
+        key=lambda r: (turn_start(r["turn"], r["started"]), r["thread"], r["turn"]),
+    )
+
+
 def endpoint(db, method, path, args):
     if method == "GET" and path == "projects":
         return listing(db, "SELECT * FROM projects ORDER BY project")
@@ -55,19 +80,28 @@ def endpoint(db, method, path, args):
         db.execute(
             """INSERT INTO projects VALUES(?,?,1) ON CONFLICT(project) DO UPDATE
                       SET active=1,since=excluded.since WHERE projects.active=0""",
-            (project, math.ceil(time.time())),
+            (project, time.time()),
         )
         return {"project": project}
     if method == "POST" and path == "disable":
         db.execute("UPDATE projects SET active=0 WHERE project=?", (project,))
         return {"project": project}
-    if method == "GET" and path == "journey":
-        return listing(
-            db,
-            """SELECT thread,turn,parent,started,status,prompt,summary FROM turns
-                              WHERE project=? ORDER BY started,thread,turn""",
-            (project,),
+    if method == "POST" and path == "observe-turn":
+        key = project, args["thread"], args["turn"]
+        row = db.execute(
+            """SELECT started,since FROM turns JOIN projects USING(project)
+               WHERE project=? AND thread=? AND turn=? AND active=1 AND status='inProgress'""",
+            key,
+        ).fetchone()
+        if not row or turn_start(args["turn"], row["started"]) < row["since"]:
+            return {"accepted": False}
+        db.execute(
+            "UPDATE turns SET updated=? WHERE project=? AND thread=? AND turn=?",
+            (time.time(), *key),
         )
+        return {"accepted": True}
+    if method == "GET" and path == "journey":
+        return journey(db, project)
     if method == "GET" and path == "transcript":
         row = db.execute(
             "SELECT items FROM turns WHERE project=? AND thread=? AND turn=?",
@@ -94,15 +128,21 @@ def endpoint(db, method, path, args):
         row = db.execute(
             "SELECT since, active FROM projects WHERE project=?", (project,)
         ).fetchone()
-        if not row or not row["active"] or args["started"] < row["since"]:
+        if (
+            not row
+            or not row["active"]
+            or turn_start(args["turn"], args["started"]) < row["since"]
+        ):
             return {"accepted": False}
         if args["status"] not in ("inProgress", "completed", "failed", "interrupted"):
             raise ValueError("Invalid turn status")
         db.execute(
-            """INSERT INTO turns VALUES(?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,parent,items,revision,updated)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(project,thread,turn) DO UPDATE SET
                     status=excluded.status,prompt=excluded.prompt,summary=excluded.summary,
-                    parent=excluded.parent,items=excluded.items,revision=excluded.revision
+                    parent=excluded.parent,items=excluded.items,revision=excluded.revision,
+                    updated=COALESCE(excluded.updated,turns.updated)
                     WHERE excluded.revision > turns.revision AND
                     (turns.status='inProgress' OR excluded.status!='inProgress')""",
             (
@@ -116,6 +156,7 @@ def endpoint(db, method, path, args):
                 args.get("parent"),
                 json.dumps(args["items"], ensure_ascii=False),
                 args["revision"],
+                time.time() if args.get("observed", True) else None,
             ),
         )
         return {"accepted": True}
@@ -194,6 +235,8 @@ class JournalHandler(BaseHTTPRequestHandler):
             return self.reply(404, {})
         args = {k: v[0] for k, v in parse_qs(url.query).items()} | body
         with closing(connect(self.server.database)) as db, db:
+            if self.command == "POST":
+                db.execute("BEGIN IMMEDIATE")
             result = endpoint(db, self.command, url.path[5:], args)
         self.reply(200, result)
 
@@ -215,6 +258,10 @@ def make_server(host, port, database, token):
         raise ValueError("Set AGENT_JOURNAL_TOKEN first")
     with closing(connect(database)) as db:
         db.executescript(SCHEMA)
+        if "updated" not in {
+            row["name"] for row in db.execute("PRAGMA table_info(turns)")
+        }:
+            db.execute("ALTER TABLE turns ADD COLUMN updated REAL")
     server = ThreadingHTTPServer((host, port), JournalHandler)
     server.token, server.database = token, database
     return server
