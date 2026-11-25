@@ -4,10 +4,10 @@ import os
 import shlex
 import subprocess
 import tempfile
-import textwrap
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .graph import layout
@@ -23,6 +23,43 @@ OBSERVATION = {"unavailable": "Observer offline", "stopped": "Recording stopped"
 CLICK = curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED
 WHEEL_UP = curses.BUTTON4_PRESSED
 WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0)
+AXES = ("Journey", "Turn notes", "Project notes")
+AXIS_KEYS = tuple(map(ord, "123"))
+MOVE = {ord("j"): 1, ord("k"): -1, curses.KEY_DOWN: 1, curses.KEY_UP: -1}
+
+
+@dataclass
+class Board:
+    axes: frozenset[int] = frozenset(range(3))
+    active: int = 0
+    turn: tuple[str, str] | None = None
+    note_ids: dict[int, str] = field(default_factory=dict)
+    top: int = 0
+    project_top: int | None = None
+    before: str = ""
+
+    def focus(self, axis):
+        return replace(
+            self, axes=frozenset({axis}), active=axis, note_ids=self.note_ids.copy()
+        )
+
+    def toggle(self, axis):
+        if axis not in self.axes:
+            self.axes |= {axis}
+        elif len(self.axes) > 1:
+            self.axes -= {axis}
+            if self.active == axis:
+                self.active = min(self.axes)
+
+
+@dataclass
+class Item:
+    title: str
+    content: str
+    note: dict | None = None
+    offset: int = 0
+    width: int = 0
+    lines: list[str] = field(default_factory=list)
 
 
 def fit(text, n):
@@ -151,55 +188,6 @@ def entry(win, title):
         win.timeout(300)
 
 
-def choose_note(win, candidates):
-    selected = 0
-    win.timeout(-1)
-    try:
-        while True:
-            h, w = win.getmaxyx()
-            win.erase()
-            hits = {}
-            draw_buttons(win, 0, w - 1, [("Cancel", 27)], hits)
-            write(
-                win, 0, 10, "Edit a note · j/k select · Enter edit · Esc cancel", w - 11
-            )
-            count = max(1, h - 2)
-            top = max(0, selected - count + 1)
-            rows = candidates[top : top + count]
-            for index, note in enumerate(rows, top):
-                label = "Turn" if note["turn"] else "Project"
-                write(
-                    win,
-                    index - top + 1,
-                    0,
-                    f"{label} · {note['body']}",
-                    w - 1,
-                    curses.A_REVERSE if index == selected else 0,
-                )
-            win.refresh()
-            key = win.getch()
-            if key == curses.KEY_MOUSE:
-                event = mouse_event()
-                if event is None:
-                    continue
-                x, y, key = event
-                if not key and 0 <= x < w - 1:
-                    if (y, x) in hits:
-                        key = hits[y, x]
-                    elif 1 <= y <= len(rows):
-                        return rows[y - 1]
-            if key == 27:
-                return None
-            if key in (10, 13):
-                return candidates[selected]
-            if key in (ord("j"), curses.KEY_DOWN):
-                selected = min(selected + 1, len(candidates) - 1)
-            if key in (ord("k"), curses.KEY_UP):
-                selected = max(0, selected - 1)
-    finally:
-        win.timeout(300)
-
-
 def edit_body(win, body):
     editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi")
     with tempfile.TemporaryDirectory(prefix="journal-note-") as folder:
@@ -220,6 +208,285 @@ def edit_body(win, body):
             win.refresh()
 
 
+def turn_key(row):
+    return row["thread"], row["turn"]
+
+
+def note_in(items, identifier, *, latest=False):
+    return next(
+        (note for note in items if note["id"] == identifier),
+        items[-1 if latest else 0] if items else None,
+    )
+
+
+def focus_axis(view, axis, turns, turn_notes):
+    view.active = axis
+    if axis == 1 and not turn_notes.get(view.turn):
+        keys = [turn_key(turn) for turn in turns]
+        anchor = keys.index(view.turn) if view.turn in keys else len(keys) - 1
+        candidates = (i for i, key in enumerate(keys) if key in turn_notes)
+        index = min(candidates, key=lambda i: abs(i - anchor), default=None)
+        if index is not None:
+            view.turn = keys[index]
+
+
+def axis_path(view, width):
+    axes = sorted(view.axes)
+    names = " + ".join(f"{axis + 1} {AXES[axis]}" for axis in axes)
+    if len(names) + 7 > width:
+        names = " + ".join(str(axis + 1) for axis in axes)
+    return "Axes · " + names
+
+
+def draw_board(
+    win, view, focused, turns, graphs, turn_notes, project_notes, palette, message
+):
+    h, w = win.getmaxyx()
+    hits, turn_rows, note_rows = {}, {}, {}
+    if focused:
+        draw_buttons(win, 1, w - 1, [("Back", 27)], hits)
+        write(win, 1, 7, axis_path(view, w - 8), w - 8, curses.A_BOLD)
+    buttons = 2 if focused else 1
+    start = buttons + 2
+    labels = (
+        ("1 Journey", "2 Turn notes", "3 Project notes")
+        if w >= 47
+        else ("1 Journey", "2 Turn", "3 Project")
+        if w >= 34
+        else ("1", "2", "3")
+    )
+    draw_buttons(
+        win,
+        buttons,
+        w - 1,
+        zip(labels, AXIS_KEYS),
+        hits,
+        active=[AXIS_KEYS[axis] for axis in view.axes] if focused else (),
+    )
+    weights = [2 * (0 in view.axes), int(1 in view.axes), int(2 in view.axes)]
+    total = sum(weights)
+    split = w * weights[0] // total
+    second = w * sum(weights[:2]) // total
+    for axis, (x, end) in enumerate(zip((0, split, second), (split, second, w))):
+        if axis in view.axes:
+            style = curses.A_REVERSE if view.active == axis else curses.A_BOLD
+            write(win, start - 1, x, AXES[axis], end - x - 1, style)
+
+    height = max(1, (h - start - 2) // 2)
+    keys = [turn_key(turn) for turn in turns]
+    idx = keys.index(view.turn) if view.turn in keys else max(0, len(keys) - 1)
+    view.turn = keys[idx] if keys else None
+    view.top = max(0, idx - height + 1, min(view.top, idx, len(keys) - height))
+    if 2 in view.axes:
+        picked = note_in(project_notes, view.note_ids.get(2), latest=True)
+        limit = max(0, len(project_notes) - height)
+        view.project_top = min(
+            view.project_top if view.project_top is not None else limit, limit
+        )
+        if picked and view.active == 2:
+            index = project_notes.index(picked)
+            view.project_top = max(0, index - height + 1, min(view.project_top, index))
+        for i, note in enumerate(
+            project_notes[view.project_top : view.project_top + height]
+        ):
+            y = start + 2 * i
+            selected = view.active == 2 and note == picked
+            write(
+                win,
+                y,
+                second,
+                ("› " if selected else "  ") + note["body"],
+                w - second - 1,
+                curses.A_REVERSE if selected else 0,
+            )
+            note_rows[2, y] = note
+
+    lane_count = max(
+        (lane + 1 for item in graphs for lane, _, _, _ in item["tracks"]), default=0
+    )
+    room = max(0, min(split - 8, split // 2))
+    step = 2 if 2 * lane_count - 1 <= room else 1
+    overflow = 0 < room < lane_count
+    lanes = min(lane_count, room - overflow)
+    text_x = 2 + max(0, (lanes - 1) * step + 1) + overflow
+    for i in range(view.top, min(view.top + height, len(turns))):
+        turn = turns[i]
+        y = start + 2 * (i - view.top)
+        selected = i == idx
+        pointer = ">" if selected else " "
+        style = curses.A_REVERSE if selected and view.active == 0 else 0
+        if 0 in view.axes:
+            write(win, y, 0, pointer, 1, curses.A_BOLD)
+            draw_session_graph(win, y, graphs[i], palette, lanes, step, overflow)
+            write(
+                win,
+                y,
+                text_x,
+                f"{turn['thread'][-5:]}  {turn['prompt']}",
+                split - text_x - 1,
+                style,
+            )
+            status = OBSERVATION.get(turn.get("observation"), STATE[turn["status"]])
+            write(
+                win,
+                y + 1,
+                text_x,
+                f"{status} · {turn['summary']}",
+                split - text_x - 1,
+            )
+        if 1 in view.axes:
+            attached = turn_notes.get(keys[i], [])
+            note = note_in(attached, view.note_ids.get(1))
+            if note:
+                prefix = (
+                    f"[{attached.index(note) + 1}/{len(attached)}] "
+                    if len(attached) > 1
+                    else ""
+                )
+                note_selected = selected and view.active == 1
+                write(
+                    win,
+                    y,
+                    split,
+                    ("› " if note_selected else "  ") + prefix + note["body"],
+                    second - split - 1,
+                    curses.A_REVERSE if note_selected else 0,
+                )
+                note_rows[1, y] = note
+            if 0 not in view.axes:
+                write(
+                    win, y + 1, split, f"{pointer} {turn['prompt']}", second - split - 1
+                )
+        turn_rows[y] = turn_rows[y + 1] = keys[i]
+    if not turns and view.axes & {0, 1}:
+        write(win, start, 0, "No recorded turns yet", max(split, second) - 1)
+    if not project_notes and 2 in view.axes:
+        write(win, start, second, "No project notes yet", w - second - 1)
+    action_labels = (
+        ("Transcript", "+ Turn note", "+ Project note", "Older", "Latest")
+        if w >= 61
+        else ("Open", "+ Turn", "+ Project", "<", ">")
+        if w >= 38
+        else ("Open", "+T", "+P", "<", ">")
+    )
+    available = ""
+    if 0 in view.axes:
+        available += "t"
+    if view.axes & {0, 1}:
+        available += "mbg"
+    if 2 in view.axes:
+        available += "n"
+    draw_buttons(
+        win,
+        h - 2,
+        w - 1,
+        (
+            (label, ord(key))
+            for label, key in zip(action_labels, "tmnbg")
+            if key in available
+        ),
+        hits,
+    )
+    help_text = (
+        "1–3 toggle axes   Tab focus   j/k move   Enter open   e edit   Esc back"
+        if focused
+        else "1–3 focus on an axis   Enter open   m/n add notes   q quit"
+    )
+    write(win, h - 1, 0, message or help_text, w - 1)
+    return hits, turn_rows, note_rows, start, split, second
+
+
+def show_item(win, view, item, message):
+    h, w = win.getmaxyx()
+    hits = {}
+    write(win, 1, 2, axis_path(view, w - 3), w - 3, curses.A_BOLD)
+    draw_buttons(win, 2, w - 1, [("Close", 27)], hits)
+    write(win, 2, 8, item.title, w - 9, curses.A_REVERSE)
+    width = w - 3
+    if item.width != width:
+        item.width = width
+        item.lines = []
+        for line in item.content.split("\n"):
+            line = "".join(
+                char
+                for char in line.expandtabs(4)
+                if not unicodedata.category(char).startswith("C")
+            )
+            if not line:
+                item.lines.append("")
+                continue
+            start = used = 0
+            for i, char in enumerate(line):
+                cells = 2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
+                if used + cells > width:
+                    item.lines.append(line[start:i])
+                    start, used = i, 0
+                used += cells
+            item.lines.append(line[start:])
+    height = h - 4
+    item.offset = min(item.offset, max(0, len(item.lines) - height))
+    for i, line in enumerate(item.lines[item.offset : item.offset + height], 3):
+        write(win, i, 2, line, width)
+    actions = "j/k scroll · Esc close"
+    if item.note:
+        actions += " · e edit"
+    write(win, h - 1, 0, message or actions, w - 1)
+    win.refresh()
+    key = win.getch()
+    if key == curses.KEY_MOUSE:
+        event = mouse_event()
+        if event is None:
+            return 0
+        x, y, key = event
+        if not key:
+            return hits.get((y, x), 0)
+        if not 3 <= y < h - 1:
+            return 0
+    if key in MOVE:
+        item.offset = max(0, min(item.offset + MOVE[key], len(item.lines) - height))
+    return key
+
+
+def transcript_item(api, project, turn):
+    items = api.request(
+        "transcript", project=project, thread=turn["thread"], turn=turn["turn"]
+    )
+    sections = []
+    for item in items:
+        content = item.get("text") or json.dumps(item, ensure_ascii=False, indent=2)
+        sections.append(f"[{item['type']}]\n{content}")
+    return Item(
+        "Transcript · " + turn["prompt"], "\n".join(sections) or "No transcript items."
+    )
+
+
+def note_item(note, turns):
+    title = "Project note"
+    if note["turn"]:
+        prompt = next(
+            (r["prompt"] for r in turns if turn_key(r) == turn_key(note)), note["turn"]
+        )
+        title = "Turn note · " + prompt
+    return Item(title, note["body"], note)
+
+
+def update_note(win, api, project, item):
+    body = edit_body(win, item.note["body"])
+    if body:
+        saved = api.request(
+            "edit-note",
+            {
+                "project": project,
+                "id": item.note["id"],
+                "version": item.note["version"],
+                "body": body,
+            },
+        )
+        item.content = body
+        item.width = 0
+        item.note = item.note | {"body": body, "version": saved["version"]}
+
+
 def show(win, api, project, mouse):
     palette = terminal_palette()
     try:
@@ -229,178 +496,87 @@ def show(win, api, project, mouse):
     if mouse:
         curses.mousemask(CLICK | (WHEEL_UP | WHEEL_DOWN if WHEEL_DOWN else 0))
     win.timeout(300)
-    turns, graphs, notes = [], [], []
-    selected, detail = None, None
-    offset, last, message = 0, 0, ""
-    top, project_offset = 0, 0
-    visible = [True, True, True]
-    before, has_older = "", False
+    root = view = Board()
+    item = None
+    turns, graphs, turn_notes, project_notes = [], [], {}, []
+    loaded_before, last, message, has_older = None, 0, "", False
     while True:
-        if detail is None and time.monotonic() - last >= 3:
+        if item is None and (
+            loaded_before != view.before or time.monotonic() - last >= 3
+        ):
             try:
                 batch = api.request(
                     "journey",
                     project=project,
                     limit=PAGE_SIZE + 1,
-                    before=before,
+                    before=view.before,
                     lanes="true",
                 )
+                notes = api.request("notes", project=project)
                 has_older = len(batch) > PAGE_SIZE
                 turns = batch[-PAGE_SIZE:]
-                if batch and "graph_lanes" not in batch[0]:
-                    graphs = list(layout(batch))[-PAGE_SIZE:]
-                else:
-                    graphs = [row["graph_lanes"] for row in turns]
-                notes = api.request("notes", project=project)
+                graphs = (
+                    list(layout(batch))[-PAGE_SIZE:]
+                    if batch and "graph_lanes" not in batch[0]
+                    else [row["graph_lanes"] for row in turns]
+                )
+                turn_notes, project_notes = {}, []
+                for note in notes:
+                    if note["turn"]:
+                        turn_notes.setdefault(turn_key(note), []).append(note)
+                    else:
+                        project_notes.append(note)
                 message = ""
             except (OSError, RuntimeError) as e:
                 message = str(e)
-            last = time.monotonic()
-        keys = [(r["thread"], r["turn"]) for r in turns]
-        idx = keys.index(selected) if selected in keys else max(0, len(keys) - 1)
-        selected = keys[idx] if keys else None
+            loaded_before, last = view.before, time.monotonic()
+
         h, w = win.getmaxyx()
         win.erase()
         write(win, 0, 0, project, w - 1, curses.A_BOLD)
         if h < 8 or w < 25:
             if h > 1:
-                write(win, 1, 0, "Enlarge the pane · q quit", w - 1)
+                write(win, 1, 0, "Enlarge the pane · Esc back · q quit", w - 1)
             win.refresh()
-            if win.getch() == ord("q"):
+            key = win.getch()
+            if key == ord("q"):
                 return
+            if key == 27:
+                if item is not None:
+                    item = None
+                else:
+                    view = root
             continue
-        hits, turn_rows, project_rows = {}, {}, {}
-        if detail is not None:
-            draw_buttons(win, 1, w - 1, [("Close", 27)], hits)
-            write(win, 1, 8, "Transcript · j/k scroll · Esc close", w - 9)
-            offset = min(offset, max(0, len(detail) - (h - 3)))
-            for i, line in enumerate(detail[offset : offset + h - 3]):
-                write(win, i + 2, 0, line, w - 1)
-        else:
-            labels = (
-                ("1 Journey", "2 Turn notes", "3 Project notes")
-                if w >= 47
-                else ("1 Journey", "2 Turn", "3 Project")
-                if w >= 34
-                else ("1", "2", "3")
-            )
-            column_keys = (ord("1"), ord("2"), ord("3"))
-            draw_buttons(
-                win,
-                1,
-                w - 1,
-                zip(labels, column_keys),
-                hits,
-                active=[key for enabled, key in zip(visible, column_keys) if enabled],
-            )
-            weights = [2 * visible[0], int(visible[1]), int(visible[2])]
-            total = sum(weights)
-            split = w * weights[0] // total
-            second = w * sum(weights[:2]) // total
-            for enabled, (x, label) in zip(
-                visible,
-                [(0, "Journey"), (split, "Turn notes"), (second, "Project notes")],
-            ):
-                if not enabled:
-                    continue
-                write(win, 2, x, label, w - x - 1, curses.A_BOLD)
-            height = max(1, (h - 5) // 2)
-            top = max(0, idx - height + 1, min(top, idx, len(keys) - height))
-            free = [n for n in notes if not n["turn"]]
-            max_project_offset = max(0, len(free) - height)
-            project_offset = min(project_offset, max_project_offset)
-            if visible[2]:
-                end = len(free) - project_offset
-                for i, n in enumerate(free[max(0, end - height) : end]):
-                    y = 3 + 2 * i
-                    write(win, y, second, n["body"], w - second - 1)
-                    project_rows[y] = n
-            lane_count = max(
-                (lane + 1 for item in graphs for lane, _, _, _ in item["tracks"]),
-                default=0,
-            )
-            room = max(0, min(split - 8, split // 2))
-            step = 2 if 2 * lane_count - 1 <= room else 1
-            overflow = 0 < room < lane_count
-            lanes = min(lane_count, room - overflow)
-            graph_width = max(0, (lanes - 1) * step + 1) + overflow
-            text_x = 2 + graph_width
-            for i, r in enumerate(turns[top : top + height]):
-                y = 3 + 2 * i
-                focused = top + i == idx
-                pointer = ">" if focused else " "
-                style = curses.A_REVERSE if focused else 0
-                if visible[0]:
-                    write(win, y, 0, pointer, 1, curses.A_BOLD)
-                    draw_session_graph(
-                        win, y, graphs[top + i], palette, lanes, step, overflow
-                    )
-                    write(
-                        win,
-                        y,
-                        text_x,
-                        f"{r['thread'][-5:]}  {r['prompt']}",
-                        split - text_x - 1,
-                        style,
-                    )
-                    status = OBSERVATION.get(r.get("observation"), STATE[r["status"]])
-                    write(
-                        win,
-                        y + 1,
-                        text_x,
-                        f"{status} · {r['summary']}",
-                        split - text_x - 1,
-                    )
-                attached = [
-                    n
-                    for n in notes
-                    if (n["thread"], n["turn"]) == (r["thread"], r["turn"])
-                ]
-                write(
-                    win,
-                    y,
-                    split,
-                    " / ".join(n["body"] for n in attached),
-                    second - split - 1,
-                )
-                turn_rows[y] = (keys[top + i], attached)
-                turn_rows[y + 1] = (keys[top + i], [])
-                if not visible[0] and visible[1]:
-                    write(
-                        win,
-                        y + 1,
-                        split,
-                        f"{pointer} {r['prompt']}",
-                        second - split - 1,
-                        style,
-                    )
-            if not turns and visible[0]:
-                write(win, 4, 0, "No recorded turns yet", max(1, split - 1))
-            action_labels = (
-                ("Transcript", "+ Turn note", "+ Project note", "Older", "Latest")
-                if w >= 61
-                else ("Open", "+ Turn", "+ Project", "<", ">")
-                if w >= 38
-                else ("Open", "+T", "+P", "<", ">")
-            )
-            draw_buttons(
-                win,
-                h - 2,
-                w - 1,
-                zip(action_labels, (10, ord("m"), ord("n"), ord("b"), ord("g"))),
-                hits,
-            )
-            write(
-                win,
-                h - 1,
-                0,
-                message
-                or "1–3 columns   j/k move   Enter transcript   m/n add   e edit   b/g older/latest   q quit",
-                w - 1,
-            )
+
+        if item is not None:
+            key = show_item(win, view, item, message)
+            if key in (27, 10, 13):
+                item = None
+                message = ""
+            elif key == ord("q"):
+                return
+            elif key == ord("e") and item.note:
+                try:
+                    update_note(win, api, project, item)
+                    message, last = "", 0
+                except (OSError, RuntimeError) as e:
+                    message = str(e)
+            continue
+
+        hits, turn_rows, note_rows, start, split, second = draw_board(
+            win,
+            view,
+            view is not root,
+            turns,
+            graphs,
+            turn_notes,
+            project_notes,
+            palette,
+            message,
+        )
         win.refresh()
         key = win.getch()
-        note_choices = None
+        clicked_note = None
         if key == curses.KEY_MOUSE:
             event = mouse_event()
             if event is None:
@@ -408,108 +584,130 @@ def show(win, api, project, mouse):
             x, y, key = event
             if not (0 <= x < w - 1 and 0 <= y < h):
                 continue
+            axis = 0 if x < split else 1 if x < second else 2
             if not key:
                 key = hits.get((y, x), 0)
-                if detail is None and not key:
-                    if visible[2] and x >= second and y in project_rows:
-                        key, note_choices = ord("e"), [project_rows[y]]
-                    elif x < second and y in turn_rows:
-                        selected, attached = turn_rows[y]
-                        if x >= split and attached:
-                            key, note_choices = ord("e"), attached
-            elif detail is None and 3 <= y < h - 2:
-                step = 1 if key == curses.KEY_DOWN else -1
-                if visible[2] and x >= second:
-                    project_offset = max(
-                        0, min(project_offset - step, max_project_offset)
+                if not key and start - 1 <= y < h - 2:
+                    clicked_note = note_rows.get((axis, y))
+                    view.active = axis
+                    if axis < 2 and y in turn_rows:
+                        view.turn = turn_rows[y]
+                    if clicked_note:
+                        view.note_ids[axis] = clicked_note["id"]
+                        key = 10
+            elif start <= y < h - 2:
+                view.active = axis
+                height = max(1, (h - start - 2) // 2)
+                if axis == 0:
+                    view.top = max(0, min(view.top + MOVE[key], len(turns) - height))
+                elif axis == 2:
+                    view.project_top = max(
+                        0,
+                        min(view.project_top + MOVE[key], len(project_notes) - height),
                     )
-                    continue
-                top = max(0, min(top + step, len(keys) - height))
-            elif detail is None:
+            else:
                 continue
+
         if key == ord("q"):
             return
-        if detail is not None:
-            if key in (27, 10, 13):
-                detail, offset = None, 0
-            elif key in (ord("j"), curses.KEY_DOWN):
-                offset = min(offset + 1, max(0, len(detail) - (h - 3)))
-            elif key in (ord("k"), curses.KEY_UP):
-                offset = max(0, offset - 1)
+        if key == 27:
+            view = root
+            message = ""
             continue
-        if key in (ord("1"), ord("2"), ord("3")):
-            col = key - ord("1")
-            if not visible[col] or sum(visible) > 1:
-                visible[col] = not visible[col]
-        elif key in (ord("j"), curses.KEY_DOWN) and visible == [False, False, True]:
-            project_offset = max(0, project_offset - 1)
-        elif key in (ord("k"), curses.KEY_UP) and visible == [False, False, True]:
-            project_offset = min(project_offset + 1, max_project_offset)
-        elif key in (ord("j"), curses.KEY_DOWN) and keys:
-            selected = keys[min(len(keys) - 1, idx + 1)]
-        elif key in (ord("k"), curses.KEY_UP) and keys:
-            selected = keys[max(0, idx - 1)]
-        elif key == ord("b") and has_older and turns:
-            first = turns[0]
-            before = json.dumps([first["started"], first["turn"], first["thread"]])
-            selected, last = None, 0
-        elif key == ord("g"):
-            before, selected, last = "", None, 0
-        elif key in (10, 13, ord("m"), ord("n"), ord("e")):
-            try:
-                target = (
-                    {"thread": selected[0], "turn": selected[1]} if selected else {}
+        if key in AXIS_KEYS:
+            axis = AXIS_KEYS.index(key)
+            if view is root:
+                view = root.focus(axis)
+                focus_axis(view, axis, turns, turn_notes)
+            else:
+                view.toggle(axis)
+            continue
+        if key == 9:
+            axes = sorted(view.axes)
+            axis = axes[(axes.index(view.active) + 1) % len(axes)]
+            focus_axis(view, axis, turns, turn_notes)
+            continue
+
+        selected_turn_notes = turn_notes.get(view.turn, [])
+        keys = [turn_key(turn) for turn in turns]
+        if key in MOVE:
+            step = MOVE[key]
+            if view.active == 1:
+                items = [note for key in keys for note in turn_notes.get(key, [])]
+                selected = note_in(selected_turn_notes, view.note_ids.get(1))
+            elif view.active == 2:
+                items = project_notes
+                selected = note_in(items, view.note_ids.get(2), latest=True)
+            else:
+                items, selected = [], None
+            if items:
+                index = (
+                    items.index(selected) + step
+                    if selected is not None
+                    else (0 if step > 0 else len(items) - 1)
                 )
-                if key in (10, 13) and selected:
-                    items = api.request("transcript", project=project, **target)
-                    detail = []
-                    for item in items:
-                        detail.append("[" + item["type"] + "]")
-                        text = item.get("text") or json.dumps(
-                            item, ensure_ascii=False, indent=2
-                        )
-                        for line in text.splitlines():
-                            detail.extend(
-                                textwrap.wrap(line, max(1, (w - 1) // 2)) or [""]
-                            )
-                elif key == ord("e"):
-                    if note_choices is None:
-                        candidates = [
-                            n
-                            for n in notes
-                            if n["turn"] is None or (n["thread"], n["turn"]) == selected
-                        ]
-                        note = choose_note(win, candidates) if candidates else None
-                    else:
-                        note = (
-                            note_choices[0]
-                            if len(note_choices) == 1
-                            else choose_note(win, note_choices)
-                        )
-                    if note:
-                        body = edit_body(win, note["body"])
-                        if body:
-                            api.request(
-                                "edit-note",
-                                {
-                                    "project": project,
-                                    "id": note["id"],
-                                    "version": note["version"],
-                                    "body": body,
-                                },
-                            )
-                            last = 0
-                elif key == ord("n") or (key == ord("m") and selected):
-                    body = entry(win, "Note · Enter saves · Empty line cancels")
-                    if body:
-                        api.request(
-                            "notes",
-                            {"project": project, "id": uuid.uuid4().hex, "body": body}
-                            | (target if key == ord("m") else {}),
-                        )
-                        last = 0
-            except (OSError, RuntimeError) as e:
-                message = str(e)
+                note = items[max(0, min(len(items) - 1, index))]
+                view.note_ids[view.active] = note["id"]
+                if view.active == 1:
+                    view.turn = turn_key(note)
+            elif view.active != 2 and keys:
+                view.turn = keys[
+                    max(0, min(len(keys) - 1, keys.index(view.turn) + step))
+                ]
+            continue
+        if key == ord("b") and has_older and turns:
+            first = turns[0]
+            view.before = json.dumps([first["started"], first["turn"], first["thread"]])
+            view.top, view.turn, last = 0, None, 0
+            continue
+        if key == ord("g"):
+            view.before, view.top, view.turn, last = "", 0, None, 0
+            continue
+        if key not in (10, 13, ord("t"), ord("e"), ord("m"), ord("n")):
+            continue
+
+        try:
+            if key in (ord("m"), ord("n")):
+                target = {}
+                if key == ord("m"):
+                    if view.turn is None:
+                        continue
+                    target = {"thread": view.turn[0], "turn": view.turn[1]}
+                body = entry(win, "Note · Enter saves · Empty line cancels")
+                if body:
+                    identifier = uuid.uuid4().hex
+                    api.request(
+                        "notes",
+                        {"project": project, "id": identifier, "body": body} | target,
+                    )
+                    view.note_ids[1 if target else 2] = identifier
+                    last = 0
+                continue
+            if key == ord("t") or (key in (10, 13) and view.active == 0):
+                if view.turn and 0 in view.axes:
+                    item = transcript_item(api, project, turns[keys.index(view.turn)])
+                    axis = 0
+            else:
+                axis = view.active
+                if key == ord("e") and axis == 0:
+                    axis = 1 if 1 in view.axes and selected_turn_notes else 2
+                if axis not in view.axes:
+                    continue
+                items = selected_turn_notes if axis == 1 else project_notes
+                note = clicked_note or note_in(
+                    items, view.note_ids.get(axis), latest=axis == 2
+                )
+                if note:
+                    item = note_item(note, turns)
+            if item is not None:
+                if view is root:
+                    view = root.focus(axis)
+                message = ""
+                if key == ord("e"):
+                    update_note(win, api, project, item)
+                    last = 0
+        except (OSError, RuntimeError) as e:
+            message = str(e)
 
 
 def run(api, project, *, mouse=True):

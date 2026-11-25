@@ -254,25 +254,54 @@ def check_clients(path, repo, cli, env, api, channel):
         if screen().splitlines()[0] != PROJECT:
             raise RuntimeError("The default TUI did not select the checkout's project")
         target = tmux + ["send-keys", "-t", "journal"]
-        click_label("[1 Journey]")
-        wait_for(
-            "the hidden Journey column",
-            lambda: "Journey" not in screen().splitlines()[2],
-        )
-        click_label("[1 Journey]")
-        wait_for(
-            "the restored Journey column", lambda: "Journey" in screen().splitlines()[2]
-        )
         turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
         lines = screen().splitlines()
         if [line[1] for line in lines[turn_row : turn_row + 3]] != ["●", "│", "●"]:
             raise RuntimeError("The terminal session line stops at the summary row")
+        click_label("[1 Journey]")
+        wait_for(
+            "the Journey axis view",
+            lambda: (
+                screen().splitlines()[1] == "[Back] Axes · 1 Journey"
+                and screen().splitlines()[3] == "Journey"
+            ),
+        )
+        click_label("[2 Turn notes]")
+        wait_for(
+            "the combined axis view",
+            lambda: (
+                "Axes · 1 Journey + 2 Turn notes" in screen().splitlines()[1]
+                and "Turn notes" in screen().splitlines()[3]
+            ),
+        )
+        subprocess.run(target + ["2"], check=True)
+        wait_for("the single axis again", lambda: screen().splitlines()[3] == "Journey")
+        subprocess.run(target + ["2"], check=True)
+        wait_for(
+            "the restored combined axis view",
+            lambda: "Turn notes" in screen().splitlines()[3],
+        )
+        turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
         mouse(0, 1, turn_row, click=True)
         wait_for("the selected turn", lambda: selected(TASK))
         click_label("[Transcript]")
-        wait_for("the clicked turn's transcript", lambda: ANSWER in screen())
+        wait_for(
+            "the clicked turn's transcript with its parent context",
+            lambda: (
+                ANSWER in screen()
+                and "Axes · 1 Journey + 2 Turn notes" in screen().splitlines()[1]
+                and f"[Close] Transcript · {TASK}" in screen().splitlines()[2]
+            ),
+        )
+        subprocess.run(target + ["3"], check=True)
         click_label("[Close]")
-        wait_for("the closed transcript", lambda: "[Transcript]" in screen())
+        wait_for(
+            "the restored axes and selected turn",
+            lambda: (
+                "[Back] Axes · 1 Journey + 2 Turn notes" == screen().splitlines()[1]
+                and selected(TASK)
+            ),
+        )
         if hasattr(curses, "BUTTON5_PRESSED"):
             mouse(65, 1, turn_row)
             wait_for("the turn after scrolling down", lambda: selected(NOTE_TASK))
@@ -283,12 +312,13 @@ def check_clients(path, repo, cli, env, api, channel):
             )
             mouse(65, 1, 3)
             wait_for(
-                "the transcript scrolled down", lambda: screen().splitlines()[2] == "{"
+                "the transcript scrolled down",
+                lambda: screen().splitlines()[3].strip() == "{",
             )
             mouse(64, 1, 3)
             wait_for(
                 "the transcript scrolled back",
-                lambda: screen().splitlines()[2] == "[userMessage]",
+                lambda: screen().splitlines()[3].strip() == "[userMessage]",
             )
             click_label("[Close]")
             wait_for(
@@ -310,6 +340,11 @@ def check_clients(path, repo, cli, env, api, channel):
                 for note in api.request("notes", project=PROJECT)
             ),
         )
+        click_label("[Back]")
+        wait_for(
+            "the overview and its original turn selection",
+            lambda: "Project notes" in screen().splitlines()[2] and selected(NOTE_TASK),
+        )
         subprocess.run(target + ["n"], check=True)
         wait_for("the TUI note input", lambda: "Empty line cancels" in screen())
         subprocess.run(target + ["-l", PROJECT_NOTE], check=True)
@@ -320,6 +355,29 @@ def check_clients(path, repo, cli, env, api, channel):
                 note["body"] == PROJECT_NOTE and note["turn"] is None
                 for note in api.request("notes", project=PROJECT)
             ),
+        )
+        subprocess.run(target + ["2"], check=True)
+        wait_for(
+            "the turn notes axis",
+            lambda: screen().splitlines()[1] == "[Back] Axes · 2 Turn notes",
+        )
+        subprocess.run(target + ["Enter"], check=True)
+        wait_for(
+            "an individual turn note",
+            lambda: (
+                f"[Close] Turn note · {TASK}" in screen().splitlines()[2]
+                and NOTE in screen()
+            ),
+        )
+        subprocess.run(target + ["Escape"], check=True)
+        wait_for(
+            "the returned turn notes view",
+            lambda: screen().splitlines()[1] == "[Back] Axes · 2 Turn notes",
+        )
+        subprocess.run(target + ["Escape"], check=True)
+        wait_for(
+            "the overview after leaving turn notes",
+            lambda: "Project notes" in screen().splitlines()[2],
         )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=channel)
@@ -377,11 +435,24 @@ def check_clients(path, repo, cli, env, api, channel):
         # The note display is clipped to the column width, but the whole row opens it.
         mouse(0, 110, 3, click=True)
         wait_for(
+            "an individual project note",
+            lambda: (
+                "[Close] Project note" in screen().splitlines()[2]
+                and PROJECT_NOTE in screen()
+            ),
+        )
+        subprocess.run(target + ["e"], check=True)
+        wait_for(
             "the project note edited by mouse",
             lambda: any(
                 note["body"] == MOUSE_EDIT and note["turn"] is None
                 for note in api.request("notes", project=PROJECT)
             ),
+        )
+        click_label("[Close]")
+        wait_for(
+            "the returned project notes view",
+            lambda: screen().splitlines()[1] == "[Back] Axes · 3 Project notes",
         )
         subprocess.run(target + ["q"], check=True)
     finally:

@@ -65,11 +65,13 @@ Open the terminal client from a second pane in the same repository. It reads the
 agent-journal
 ```
 
-- Toggle Journey, Turn notes, and Project notes with `1`, `2`, and `3`.
-- Select a turn with `j/k`, open its transcript with `Enter`, and return with `Esc`.
+- Press `1`, `2`, or `3` to open Journey, Turn notes, or Project notes on its own. Inside that view, use the same keys to show or hide axes. At least one axis stays open.
+- Use `Tab` to move focus between visible axes and `j/k` to select an item. Press `Enter` to open a transcript or a note. `Esc` returns to the same combination of axes and scroll position. Press `Esc` again to return to the overview.
 - Use `m` for a turn note and `n` for a project note.
-- Use `e` to select a note and open it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
-- Click a turn to select it, a note to edit it, or a bracketed control to run its action. Scroll over the Journey, Project notes, or an open transcript with the wheel where the terminal and curses support it.
+- Press `e` on a selected or open note to edit it in `VISUAL`, `EDITOR`, or `vi`. Use `b` for older turns and `g` for the latest page.
+- Click a turn to select it, a note to open it, or a bracketed control to run its action. Use the wheel over a column or inside an open item where the terminal and curses support it.
+
+The project name, active axes, and item title stay visible on separate lines as you open deeper views.
 
 The Journey graph connects turns from each session through the request and summary lines. The TUI uses your terminal's default foreground and background and its ANSI palette for session lanes. Set `NO_COLOR=1` to draw the lanes in the default foreground color.
 
