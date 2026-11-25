@@ -45,10 +45,38 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           pythonBase = pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python313; };
+          inherit (pkgs.callPackages pyproject-nix.build.hacks { }) nixpkgsPrebuilt;
+          intelMacOverlay = _final: prev: lib.optionalAttrs (system == "x86_64-darwin") {
+            # Upstream ships no Intel macOS wheels. Reuse the Nixpkgs Rust build.
+            cryptography =
+              let
+                inherit (prev.cryptography) pname version;
+                src = pkgs.fetchFromGitHub {
+                  owner = "pyca";
+                  repo = "cryptography";
+                  tag = version;
+                  hash = "sha256-FbJ3dCur3P7tf6Y617KuX0Gp9ptIlxIlZ7C9GYCoCe0=";
+                };
+              in
+              nixpkgsPrebuilt {
+                prev = prev.cryptography;
+                from = pkgs.python313Packages.cryptography.overridePythonAttrs (_: {
+                  inherit version src;
+                  cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+                    inherit pname version src;
+                    hash = "sha256-OUfcs3MIoEwUx1BQV1ZYnAx9IDEbQUWEaeddwK0LLmQ=";
+                  };
+                  patches = [ ];
+                  doCheck = false;
+                  pythonImportsCheck = [ "cryptography.hazmat.bindings._rust" ];
+                });
+              };
+          };
           pythonSet = pythonBase.overrideScope (
             lib.composeManyExtensions [
               pyproject-build-systems.overlays.wheel
               workspaceOverlay
+              intelMacOverlay
             ]
           );
           venv = pythonSet.mkVirtualEnv "agent-journal-runtime" workspace.deps.default;
@@ -102,6 +130,8 @@
             "$client" tui --help
             "$client" observe --help
             "$client" mcp --help
+            AGENT_JOURNAL_HOME="$TMPDIR/journal" AGENT_JOURNAL_TOKEN=fixture \
+              "$client" mcp </dev/null
             touch "$out"
           '';
         }
