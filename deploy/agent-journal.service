@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Journal
+After=network.target
+
+[Service]
+User=journal
+Group=journal
+EnvironmentFile=/etc/agent-journal/server.env
+UMask=0077
+ExecStart=/opt/agent-journal/current/package/bin/agent-journal serve --database /opt/agent-journal/current/data/journal.sqlite3 --deployment-id-file /opt/agent-journal/current/id --maintenance-file /opt/agent-journal/maintenance
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

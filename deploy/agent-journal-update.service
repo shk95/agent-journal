@@ -1,0 +1,10 @@
+[Unit]
+Description=Check and apply Agent Journal server releases
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/agent-journal/server_deploy.py update
+TimeoutStartSec=30min

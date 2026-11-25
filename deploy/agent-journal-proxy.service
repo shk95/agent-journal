@@ -1,0 +1,18 @@
+[Unit]
+Description=HTTPS proxy for Agent Journal
+Wants=network-online.target
+After=network-online.target agent-journal.service
+
+[Service]
+DynamicUser=yes
+StateDirectory=agent-journal-proxy
+Environment=XDG_DATA_HOME=/var/lib/agent-journal-proxy
+Environment=XDG_CONFIG_HOME=/var/lib/agent-journal-proxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ExecStart=@CADDY@ run --config /etc/agent-journal-proxy/Caddyfile --adapter caddyfile
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

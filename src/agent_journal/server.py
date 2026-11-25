@@ -277,6 +277,21 @@ class JournalHandler(BaseHTTPRequestHandler):
 
     def dispatch(self):
         url = urlsplit(self.path)
+        if self.command == "GET" and url.path == "/healthz":
+            try:
+                with closing(connect(self.server.database)) as db:
+                    db.execute("SELECT 1 FROM projects LIMIT 1").fetchone()
+            except sqlite3.Error:
+                return self.reply(503, {"status": "unavailable"})
+            return self.reply(
+                200, {"status": "ready", "deployment": self.server.deployment_id}
+            )
+        if self.server.maintenance_file and self.server.maintenance_file.exists():
+            return self.reply(
+                503,
+                {"error": "Journal maintenance in progress"},
+                headers={"Retry-After": "15"},
+            )
         files = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript"),
@@ -352,7 +367,9 @@ class JournalHandler(BaseHTTPRequestHandler):
     do_POST = do_GET
 
 
-def make_server(host, port, database, token):
+def make_server(
+    host, port, database, token, *, deployment_id=None, maintenance_file=None
+):
     if not token:
         raise ValueError("Set AGENT_JOURNAL_TOKEN first")
     with closing(connect(database)) as db:
@@ -373,4 +390,5 @@ def make_server(host, port, database, token):
             )
     server = ThreadingHTTPServer((host, port), JournalHandler)
     server.token, server.database = token, database
+    server.deployment_id, server.maintenance_file = deployment_id, maintenance_file
     return server

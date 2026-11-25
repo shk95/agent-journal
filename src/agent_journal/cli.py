@@ -40,6 +40,8 @@ def main():
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--database", type=Path)
+    serve.add_argument("--deployment-id-file", type=Path)
+    serve.add_argument("--maintenance-file", type=Path)
     snapshot = commands.add_parser("backup")
     snapshot.add_argument("--database", type=Path)
     snapshot.add_argument("--output", type=Path, required=True)
@@ -80,6 +82,12 @@ def main():
                 args.port,
                 args.database or state_dir() / "server.sqlite3",
                 os.environ.get("AGENT_JOURNAL_TOKEN", ""),
+                deployment_id=(
+                    args.deployment_id_file.read_text(encoding="utf-8").strip()
+                    if args.deployment_id_file
+                    else None
+                ),
+                maintenance_file=args.maintenance_file,
             ) as server:
                 print(f"Journal listening on {server.server_address}", flush=True)
                 server.serve_forever()

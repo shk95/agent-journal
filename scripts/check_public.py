@@ -26,6 +26,8 @@ SOURCE_FILES = (
     "tests/*.py",
     "scripts/*.py",
     "docs/*.md",
+    "deploy/*.service",
+    "deploy/*.timer",
     ".github/workflows/*.yml",
 )
 LOCAL_VALUE = re.compile(

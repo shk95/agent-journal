@@ -1,5 +1,5 @@
 {
-  description = "Agent Journal client for Codex work machines";
+  description = "Agent Journal client and server";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -72,6 +72,7 @@
           inherit client;
           default = client;
         }
+        // lib.optionalAttrs (lib.hasSuffix "-linux" system) { server = client; }
       );
 
       apps = forSystems (
