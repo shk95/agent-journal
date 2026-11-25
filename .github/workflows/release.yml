@@ -114,4 +114,4 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" server-release.json release-assets/* \
             --verify-tag --title "$RELEASE_TAG" --generate-notes \
-            --notes "[Client installation](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/SETUP.md) · [Server installation](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/OPERATIONS.md)"
+            --notes "[Install the standalone client (default)](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/SETUP.md#standalone-client) · [Server installation](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/OPERATIONS.md)"

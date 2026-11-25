@@ -1,5 +1,11 @@
 # Agent Journal repository instructions
 
+## Client installation requests
+
+When asked to install the Agent Journal client, use the [standalone installer](docs/SETUP.md#standalone-client) from the latest stable GitHub Release. Use the requested release tag if the user specifies one. The installer works without Nix or a source checkout. Use the Nix package only when the user explicitly requests Nix. Verify the installation with `agent-journal --version`.
+
+## Repository development
+
 - Keep server, client, web, and tests in this repository. Run the checks in `docs/SETUP.md` before committing.
 - Run functional, Codex, UI, and deployment integration tests locally. Keep GitHub Actions focused on public repository checks and release packaging checks.
 - Use English by default for product UI, generated summaries, diagnostics, source comments, repository documentation, and Git messages. Preserve the original language of transcripts and user-authored notes.

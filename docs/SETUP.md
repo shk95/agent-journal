@@ -4,21 +4,25 @@
 
 ### Standalone client
 
-Install the latest stable release on Apple Silicon macOS, Linux x86-64, or Linux ARM64. The client bundles Python and its Python dependencies. The Linux builds require glibc 2.35 or later.
+Use the standalone GitHub Release installer by default, including when an agent is asked to install the client using the repository URL. It needs no Nix, Python installation, or source checkout. The client supports Apple Silicon macOS, Linux x86-64, and Linux ARM64. The Linux builds require glibc 2.35 or later.
 
 ```sh
-installer=$(mktemp)
-curl -fsSL --proto '=https' \
-  https://github.com/shk95/agent-journal/releases/latest/download/install-client.sh \
-  -o "$installer" && sh "$installer"
-rm -f "$installer"
+(
+  set -eu
+  installer=$(mktemp)
+  trap 'unlink "$installer"' EXIT
+  curl -fsSL --proto '=https' \
+    https://github.com/shk95/agent-journal/releases/latest/download/install-client.sh \
+    -o "$installer"
+  sh "$installer"
+)
 ```
 
 The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.2.0` to the installer to select a specific version. Run the installer again to upgrade.
 
-For agent-assisted setup, give the agent the Agent Journal repository URL and ask it to follow this section on the work machine. If Codex is on PATH, the installer sets its user-level `journal` MCP entry to the installed binary's absolute path. Restart Codex and complete [the first server connection](#connect-a-work-machine) using the server URL and token. Use a signed-in Codex CLI for observation and summaries and a signed-in GitHub CLI for project registration. Git identifies the current checkout.
+Verify the installed client with `agent-journal --version`. If Codex is on PATH, the installer sets its user-level `journal` MCP entry to the installed binary's absolute path. Restart Codex and complete [the first server connection](#connect-a-work-machine) using the server URL and token. Use a signed-in Codex CLI for observation and summaries and a signed-in GitHub CLI for project registration. Git identifies the current checkout.
 
-### Nix client
+### Optional Nix client
 
 The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (`x86_64-linux`), and Linux ARM64 (`aarch64-linux`). Enable flakes on the work machine before installing.
 
