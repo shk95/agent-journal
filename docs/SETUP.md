@@ -91,6 +91,8 @@ Run `agent-journal web` to open the overview in your browser, or `agent-journal 
 
 Use `agent-journal projects` to see the registration state. Use `agent-journal disable` to stop collecting turns for the current project. You can still read the recorded history.
 
+Run `agent-journal server-version` to print the connected server's version. Older servers may report their release through the deployment ID. If they provide neither version nor release ID, the command prints `unknown`. Use `agent-journal --version` for the local client.
+
 ## Collection and summaries
 
 The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The observer recovers subsecond start times from Codex turn IDs when available. Older records with second-only timestamps have a conservative cutoff. Turning collection back on sets a fresh cutoff.

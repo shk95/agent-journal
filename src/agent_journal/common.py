@@ -11,6 +11,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 PROJECT = re.compile(r"[a-z0-9][a-z0-9-]*/[a-z0-9_.-]+", re.IGNORECASE)
+RELEASE_DEPLOYMENT = re.compile(r"v(\d+\.\d+\.\d+)-[a-f0-9]{12}")
+SERVER_VERSION_HEADER = "X-Agent-Journal-Version"
 OBSERVATION_LEASE = 45
 OBSERVATION_REFRESH = 15
 
@@ -133,6 +135,16 @@ class Api:
     @property
     def cache_key(self):
         return hashlib.sha256(self.base.encode()).hexdigest()[:16]
+
+    def server_version(self):
+        with HTTP.open(self.base + "/healthz", timeout=8) as response:
+            version = response.headers.get(SERVER_VERSION_HEADER)
+            if version:
+                return version
+            health = json.load(response)
+        deployment = health.get("deployment") if isinstance(health, dict) else None
+        match = RELEASE_DEPLOYMENT.fullmatch(deployment) if isinstance(deployment, str) else None
+        return match[1] if match else None
 
     def request(self, path, body=None, **query):
         url = self.base + "/api/" + path

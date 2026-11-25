@@ -75,6 +75,7 @@ def main():
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
     commands.add_parser("projects")
+    commands.add_parser("server-version", help="show the connected Journal server version")
     commands.add_parser("setup-codex", help="install global Codex tools and recording hooks")
     commands.add_parser("codex-hook")
     connection = commands.add_parser("connect", help="set up the journal connection")
@@ -160,7 +161,9 @@ def main():
             print(url, flush=True)
             webbrowser.open_new_tab(url)
             return
-        if args.command == "projects":
+        if args.command == "server-version":
+            print(api.server_version() or "unknown")
+        elif args.command == "projects":
             if projects is None:
                 projects = api.request("projects")
             for row in projects:

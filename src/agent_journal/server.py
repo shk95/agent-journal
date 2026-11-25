@@ -7,10 +7,11 @@ import time
 from contextlib import closing
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .common import OBSERVATION_LEASE, PROJECT, turn_start
+from .common import OBSERVATION_LEASE, PROJECT, SERVER_VERSION_HEADER, turn_start
 from .graph import graph, layout
 
 SCHEMA = """
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS notes(
 );
 """
 STATIC = Path(__file__).parent / "static"
+SERVER_VERSION = version("agent-journal")
 
 
 def connect(path):
@@ -288,7 +290,9 @@ class JournalHandler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 return self.reply(503, {"status": "unavailable"})
             return self.reply(
-                200, {"status": "ready", "deployment": self.server.deployment_id}
+                200,
+                {"status": "ready", "deployment": self.server.deployment_id},
+                headers={SERVER_VERSION_HEADER: SERVER_VERSION},
             )
         if self.server.maintenance_file and self.server.maintenance_file.exists():
             return self.reply(

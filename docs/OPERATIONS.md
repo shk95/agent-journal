@@ -29,14 +29,18 @@ An existing manually managed `agent-journal.service` requires a separate migrati
 
 ## Publish a release
 
-Run the [local checks](SETUP.md#local-development) before tagging. On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Push a tag that matches that version.
+Agent Journal guarantees client/server compatibility across stable releases with the same major version, including `0.x`. An older client must keep working with a newer server, and a newer client must keep existing features working with an older server. Use a patch release for compatible fixes, a minor release for compatible additions, and a major release for incompatible client/server changes.
+
+Keep existing endpoint paths, required fields, and response semantics stable within a major. Add fields or endpoints without making them mandatory for older clients. When a new client uses an optional server feature, detect support and keep the existing workflow usable on older servers.
+
+On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Run the [local checks](SETUP.md#local-development) and `just compatibility`. The compatibility check exercises both client/server directions against the stable tags in the same major. Push a tag that matches the candidate version.
 
 ```sh
 git tag v0.3.0
 git push origin v0.3.0
 ```
 
-The release workflow checks the public history and verifies the Nix outputs and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
+The release workflow checks the public history, mixed client/server versions, Nix outputs, and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
 Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.3.0#client' -- tui` runs that release's client.
 

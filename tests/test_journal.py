@@ -7,8 +7,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
+from urllib.request import urlopen
 from uuid import UUID
 
 from mcp import Client
@@ -99,6 +101,18 @@ class TestJournal(unittest.TestCase):
 
     def rows(self):
         return self.api.request("journey", project="test/p")
+
+    def test_server_version_preserves_the_health_payload(self):
+        with urlopen(self.api.base + "/healthz", timeout=2) as response:
+            self.assertEqual(
+                json.load(response), {"status": "ready", "deployment": None}
+            )
+        with (
+            patch.object(sys, "argv", ["agent-journal", "server-version"]),
+            patch("builtins.print") as output,
+        ):
+            main()
+        output.assert_called_once_with(version("agent-journal"))
 
     def test_web_command_opens_configured_journal(self):
         for options, fragment in (
