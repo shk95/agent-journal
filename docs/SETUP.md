@@ -2,7 +2,23 @@
 
 ## Install
 
-Install Python 3.11 or newer and uv. Run the following command from the project checkout on each work machine and on the server.
+### Nix client
+
+Install the client CLI on a work machine with flakes enabled.
+
+```sh
+nix profile add 'github:shk95/agent-journal#client'
+agent-journal connect --url https://journal.example.com
+agent-journal tui
+```
+
+Older Nix versions use `nix profile install`. To run the client directly, use `nix run 'github:shk95/agent-journal#client' -- tui`. From a local checkout, use `nix run .#client -- tui` or `nix flake check` to verify the package.
+
+The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and summaries use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
+
+### Python package
+
+Install Python 3.11 or newer and uv. Run the following command from the project checkout on a work machine or on the server.
 
 ```sh
 uv tool install --editable .

@@ -13,6 +13,8 @@ ROOT_FILES = {
     "AGENTS.md",
     "README.md",
     "RELEASE_PLAN.md",
+    "flake.nix",
+    "flake.lock",
     "pyproject.toml",
     "uv.lock",
 }
