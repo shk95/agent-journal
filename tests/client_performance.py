@@ -365,7 +365,7 @@ def main():
         command = ("Synthetic command output for a long transcript.\n" * 120_000)[
             :5_000_000
         ]
-        item = Item("Transcript", command)
+        item = Item("Transcript", content=command)
         start = time.monotonic()
         assert len(detail_lines(item, 118, 25)) == 25 and item.wrapping is not None
         print(

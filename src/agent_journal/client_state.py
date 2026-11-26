@@ -36,14 +36,19 @@ def read_state(path, default):
         return default
 
 
-def write_state(path, value, *, durable=False):
+def write_state(path, value, *, durable=False, indent=None):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
     ) as file:
         temporary = Path(file.name)
         try:
-            json.dump(value, file, ensure_ascii=False, separators=(",", ":"))
+            json.dump(
+                value, file, ensure_ascii=False, indent=indent,
+                separators=(",", ":") if indent is None else None,
+            )
+            if indent is not None:
+                file.write("\n")
             file.flush()
             if durable:
                 os.fsync(file.fileno())
@@ -116,21 +121,10 @@ class ClientState:
         newer_pages = list(cached.get("legacy_newer_pages", []))
         notes = self.api.request("notes", project=self.project)
         batch = self.api.request("journey", **(params | ({"before": before} if before else {})))
-        if edge and "legacy_before" not in cached:
+        if edge == "first" and "legacy_before" not in cached:
             # Legacy servers expose only backwards cursors. Remember the newer pages
             # while locating the requested end so that ] can retrace them.
-            targets = {(note["thread"], note["turn"]) for note in notes if note["turn"]}
-            latest = batch
-            note_edge = None
-            while edge != "last-note" or targets:
-                if edge.endswith("-note") and any(
-                    (row["thread"], row["turn"]) in targets for row in batch[-60:]
-                ):
-                    note_edge = (before, newer_pages.copy(), batch)
-                    if edge == "last-note":
-                        break
-                if len(batch) <= 60:
-                    break
+            while len(batch) > 60:
                 row = batch[-60]
                 cursor = json.dumps([row[key] for key in ("started", "turn", "thread")])
                 if cursor == before:
@@ -138,10 +132,6 @@ class ClientState:
                 newer_pages.append(before)
                 before = cursor
                 batch = self.api.request("journey", **(params | {"before": before}))
-            if note_edge:
-                before, newer_pages, batch = note_edge
-            elif edge == "last-note":
-                before, newer_pages, batch = None, [], latest
         turns = batch[-60:]
         keys = {(row["thread"], row["turn"]) for row in turns}
         return {

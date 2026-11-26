@@ -79,7 +79,8 @@ agent-journal
 - Use `h/l` to move to the visible axis on the left or right, or `Tab` and `Shift+Tab` to cycle through the axes. Use `j/k` to move one item or line and `d/u` to move half a screen. Use `gg/G` for the first or last item on the current page. `Older` (`[`) and `Newer` (`]`) move one page. `Oldest` (`<`) and `Latest` (`>`) jump to the ends of the history for the focused axis.
 - Scroll over an axis with the mouse wheel or focus it before using the keyboard. Journey and Turn notes share a scrolling pane when both are visible. Each card contains the turn and its attached notes. Project notes scroll independently.
 - Press `Enter` to open a transcript or note. Parent layers remain visible at the top of the screen. `Esc` closes the top layer and restores the parent selection and scroll position. On short terminals, the path above the content identifies the active layer.
-- Use `m` for a turn note, `n` for a project note, and `e` to edit an existing note in place. In the editor, `i` enters Insert mode, `Esc` returns to Normal mode, `Ctrl+P` toggles the Markdown preview, and `:w` queues an immediate save.
+- A Journey turn opens the agent summary above its transcript. Each box scrolls independently and has a **View details** control that opens its full content in a separate dialog. In the terminal, press `1` for the summary or `2` for the transcript. Use `Tab` to switch boxes and `Enter` to expand the selected box. In the browser, focus the box before using the scrolling keys, or scroll over it directly. Close the expanded dialog to return to the same position in the turn details.
+- Turn notes includes turns without notes. Use `m` to add a note to the selected turn, `n` for a project note, and `e` to edit an existing note in place. In the editor, `i` enters Insert mode, `Esc` returns to Normal mode, `Ctrl+P` toggles the Markdown preview, and `:w` queues an immediate save.
 - In a note detail, `D` prompts for deletion. In a turn note, `x` selects it for moving. Navigate to another turn and press `p` to move it, or `X` to cancel the cut.
 - Use `Status` in a note detail in either client to choose Highlighted, Normal, or Low priority. In the TUI, press `s` to open the menu and `1`, `2`, or `3` to choose a status. Existing and new notes default to Normal. The status changes the title's appearance and preserves the note's position. Status changes require a server connection.
 - Click a turn to select it, a note to open it, or a bracketed control to run its action. Shortcuts appear beside the controls where space permits. For example, `[Edit] e` opens the editor when you press `e` or click the control. Use the wheel over a column or inside an open item where the terminal and curses support it.
@@ -90,7 +91,7 @@ The Journey graph connects each session's turns in a continuous column beside th
 
 Mouse input is enabled by default. In tmux, enable forwarding with `set -g mouse on`. Use `agent-journal tui --no-mouse` to leave mouse selection to the terminal or tmux.
 
-Run `agent-journal web` to open the overview in your browser, or `agent-journal web --project OWNER/REPO` to open a project directly. The command prints the URL for use in another browser or on a remote terminal. Sign in to the web journal with the server access token. The project board supports the same `h/l`, `j/k`, `gg/G`, `[/]`, and `</>` navigation as the TUI.
+Press `w` in the TUI to open the current project in your browser. From the command line, run `agent-journal web` for the overview or `agent-journal web --project OWNER/REPO` for a project. The client uses its existing connection to sign the browser in without prompting for the token. The same browser can then reopen the journal from a bookmark after a restart. Its sign-in lasts up to one year and is invalidated when the server token changes. In a browser without a session, open the journal from the client or enter the server token in the sign-in form. The project board supports the same `h/l`, `j/k`, `gg/G`, `[/]`, and `</>` navigation as the TUI. In Turn notes, keyboard navigation focuses `+ Note` on turns without notes.
 
 Open `Session filter` above Journey and pick a session. `Highlight` keeps its turns highlighted as you move around the board. `Show only` limits Journey and its attached Turn notes to that session across all pages. `Clear filter` returns to all sessions.
 
@@ -108,7 +109,18 @@ Project sizes count transcript JSON, stored prompts and summaries, and note text
 
 The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The observer recovers subsecond start times from Codex turn IDs when available. Older records with second-only timestamps have a conservative cutoff. Turning collection back on sets a fresh cutoff.
 
-The observer sends transcripts and a preliminary summary first. A separate worker runs a read-only, ephemeral `codex exec` in a temporary directory to generate an English summary. This uses model capacity. Set `AGENT_JOURNAL_SUMMARY_MODEL` to select a summary model. The preliminary summary remains visible while a failed generation waits for retry.
+The observer sends transcripts and a preliminary summary first. A separate worker runs a read-only, ephemeral `codex exec` in a temporary directory to generate an English summary. This uses model capacity. Journey displays a brief line, and the turn detail displays the fuller explanation. Older turns and turns awaiting a detailed summary display their available brief line in the summary pane.
+
+Run `agent-journal summary` to see the selected level and create `summary.json` in the local state directory. Choose Low, Normal, or High. The command also accepts `낮음`, `보통`, and `높음`.
+
+```sh
+agent-journal summary 높음
+agent-journal summary --refresh
+```
+
+Normal is the default. Higher quality gives the worker more conversation and observations to explain what happened in context. Low, Normal, and High include up to one, three, and six preceding turns from the same session within the collection period. High asks the model to make significant decisions, constraints, and supporting evidence easy to follow.
+
+Edit the level descriptions in `summary.json`. The summary worker asks Codex to choose a model and a supported reasoning effort for each quality level from its current catalog. The worker saves its choices in `summary-policy.json` and reviews them when summaries are due after a week, when descriptions change, or when the Codex executable changes. Use `--refresh` to review and show the choices immediately. A failed review keeps the previous choices and retries after an hour. Until a review succeeds, the worker uses the Codex default. An existing `AGENT_JOURNAL_SUMMARY_MODEL` override sets the model while the selected level still controls the summary's context and instructions.
 
 During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The clients show when the observer loses contact with a previously running turn or recording stops for the project. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
 

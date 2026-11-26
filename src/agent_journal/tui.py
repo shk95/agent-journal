@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from itertools import islice
 
 from .client_state import ClientState, background
+from .common import open_web
 from .graph import layout
 from .text_layout import cell_width, fit, markdown_preview, note_title, wrap
 from .tui_editor import Editor, Keys, Paste, editor_line, line_start
@@ -66,29 +67,38 @@ class Board:
                 self.active = min(self.axes)
 
 
-@dataclass
-class Item:
-    title: str
+@dataclass(kw_only=True)
+class TextPane:
     content: str = ""
+    offset: int = 0
+    width: int = 0
+    height: int = 0
+    lines: list[str] = field(default_factory=list)
+    wrapping: object = None
+    bottom: bool = False
+
+    def set_content(self, content):
+        if self.content != content:
+            self.content, self.width = content, 0
+
+
+@dataclass
+class Item(TextPane):
+    title: str
     note: dict | None = None
     context: str = ""
     editor: Editor | None = None
     loading: bool = False
     message: str = ""
-    offset: int = 0
-    width: int = 0
-    lines: list[str] = field(default_factory=list)
-    wrapping: object = None
-    bottom: bool = False
     confirm: str = ""
     choosing_priority: bool = False
     preview: str = ""
     preview_due: float = 0
     server_note: dict | None = None
-
-    def set_content(self, content):
-        if self.content != content:
-            self.content, self.width = content, 0
+    summary: TextPane | None = None
+    summary_focused: bool = True
+    pane_rows: tuple[int, int] = (0, 0)
+    expanded: "Item | None" = None
 
 
 def write(win, y, x, text, width, style=0):
@@ -235,19 +245,24 @@ def note_in(items, identifier, *, latest=False):
     )
 
 
-def notes_in_turn_order(turns, turn_notes):
-    return [note for turn in turns for note in turn_notes.get(turn_key(turn), [])]
+def turn_note_entries(turns, turn_notes):
+    return [
+        (key, note)
+        for key in map(turn_key, turns)
+        for note in turn_notes.get(key) or (None,)
+    ]
 
 
-def focus_axis(view, axis, turns, turn_notes):
-    view.active = axis
-    if axis == 1 and not turn_notes.get(view.turn):
-        keys = [turn_key(turn) for turn in turns]
-        anchor = keys.index(view.turn) if view.turn in keys else len(keys) - 1
-        candidates = (i for i, key in enumerate(keys) if turn_notes.get(key))
-        index = min(candidates, key=lambda i: abs(i - anchor), default=None)
-        if index is not None:
-            view.turn = keys[index]
+def selected_turn_note(view, turn_notes):
+    return view.turn, note_in(turn_notes.get(view.turn, []), view.note_ids.get(1))
+
+
+def select_turn_note(view, entry):
+    view.turn, note = entry
+    if note:
+        view.note_ids[1] = note["id"]
+    else:
+        view.note_ids.pop(1, None)
 
 
 def axis_path(view, width):
@@ -435,12 +450,13 @@ def draw_board(
         if not paired:
             return
         attached = turn_notes.get(keys[i], [])
-        left, right = maps.columns[1]
         if not attached:
-            write(win, y, left + 2, "No turn notes", right - left - 2, background | curses.A_DIM)
+            paint_note(1, y, None, selected, background=background)
         picked = note_in(attached, view.note_ids.get(1))
         start = max(0, attached.index(picked) - (end - y) + 1) if picked else 0
-        for offset, note in enumerate(attached[start : start + end - y], start):
+        shown = attached[start : start + end - y]
+        maps.visible[1] = maps.visible.get(1, 0) + max(1, len(shown))
+        for offset, note in enumerate(shown, start):
             row = y + offset - start
             prefix = f"[{offset + 1}/{len(attached)}] " if len(attached) > 1 else ""
             paint_note(1, row, note, selected and note == picked, prefix, background=background)
@@ -450,12 +466,16 @@ def draw_board(
     def paint_note(axis, y, note, selected, prefix="", *, background=0):
         left, right = maps.columns[axis]
         active = selected and view.active == axis
-        _, marker, style = NOTE_PRIORITIES.get(note.get("priority"), NOTE_PRIORITIES["normal"])
+        if note:
+            _, marker, style = NOTE_PRIORITIES.get(note.get("priority"), NOTE_PRIORITIES["normal"])
+            title = note_title(note)
+            maps.notes[axis, y] = note
+        else:
+            marker, style, title = "", curses.A_DIM, "No turn notes"
         write(
-            win, y, left + 1, ("› " if active else "  ") + prefix + marker + note_title(note),
+            win, y, left + 1, ("› " if active else "  ") + prefix + marker + title,
             right - left - 1, curses.A_REVERSE if active else background | style,
         )
-        maps.notes[axis, y] = note
 
     if 0 in view.axes:
         axes = (0, 1) if paired else (0,)
@@ -473,54 +493,50 @@ def draw_board(
         ]
         view.top, count = draw_cards(win, view, maps, axes, spans, heights, view.top, idx, paint_turn)
         maps.visible[0] = count
-        if paired:
-            maps.visible[1] = max(1, sum(axis == 1 for axis, _ in maps.notes))
         if not turns:
             write(win, maps.start, text_x, "No recorded turns yet", journey_right - text_x)
 
     prompts = {turn_key(turn): turn["prompt"] for turn in turns}
-    for axis, notes, top_name in (
-        (1, notes_in_turn_order(turns, turn_notes), "note_top"),
-        (2, project_notes, "project_top"),
+    for axis, top_name in (
+        (1, "note_top"),
+        (2, "project_top"),
     ):
         if axis not in view.axes or (paired and axis == 1):
             continue
-        selected_id = view.note_ids.get(axis)
         if axis == 1:
-            current = turn_notes.get(view.turn, [])
-            picked = next((note for note in current if note["id"] == selected_id), None)
-            picked = picked or (current[0] if current else note_in(notes, selected_id, latest=True))
-            if picked and view.active == axis:
-                view.turn = turn_key(picked)
+            entries = turn_note_entries(turns, turn_notes)
+            picked = selected_turn_note(view, turn_notes)
         else:
-            picked = note_in(notes, selected_id, latest=True)
+            entries = [(None, note) for note in project_notes]
+            picked = (None, note_in(project_notes, view.note_ids.get(axis), latest=True))
         left, right = maps.columns[axis]
 
         def paint(i, y, end, selected):
-            note = notes[i]
+            key, note = entries[i]
             paint_note(axis, y, note, selected)
-            context = prompts.get(turn_key(note), "") if axis == 1 else note.get("preview", note.get("body", ""))
-            if end - y > 1 and context.strip() != note_title(note):
+            context = prompts[key] if key else note.get("preview", note.get("body", ""))
+            if end - y > 1 and (not note or context.strip() != note_title(note)):
                 write(win, y + 1, left + 3, context, right - left - 3, curses.A_DIM)
             for row in range(y, end):
-                maps.notes[axis, row] = note
-                if axis == 1:
-                    maps.turns[axis, row] = turn_key(note)
+                if note:
+                    maps.notes[axis, row] = note
+                if key:
+                    maps.turns[axis, row] = key
 
         top, count = draw_cards(
-            win, view, maps, (axis,), [(left, right)], [card_height] * len(notes),
-            getattr(view, top_name), notes.index(picked) if picked else 0, paint,
+            win, view, maps, (axis,), [(left, right)], [card_height] * len(entries),
+            getattr(view, top_name), entries.index(picked) if entries else 0, paint,
         )
         setattr(view, top_name, top)
         maps.visible[axis] = count
-        if not notes:
+        if not entries:
             write(win, maps.start, left + 2, "No " + AXES[axis].lower() + " yet", right - left - 2)
     action_labels = (
-        ("Transcript", "+ Turn note", "+ Project note", "Older", "Newer", "Oldest", "Latest", "Paste")
+        ("Transcript", "+ Turn note", "+ Project note", "Older", "Newer", "Oldest", "Latest", "Paste", "Web")
         if w >= 61
-        else ("Open", "+ Turn", "+ Project", "Prev", "Next", "First", "Last", "Paste")
+        else ("Open", "+ Turn", "+ Project", "Prev", "Next", "First", "Last", "Paste", "Web")
         if w >= 38
-        else ("Open", "+T", "+P", "Prev", "Next", "First", "Last", "Paste")
+        else ("Open", "+T", "+P", "Prev", "Next", "First", "Last", "Paste", "Web")
     )
     available = ""
     if 0 in view.axes:
@@ -534,14 +550,14 @@ def draw_board(
         available += "["
     if page.get(prefix + "later"):
         available += "]"
-    available += "<>"
+    available += "<>w"
     draw_buttons(
         win,
         h - 2,
         w - 1,
         (
             (label, ord(key))
-            for label, key in zip(action_labels, "tmn[]<>p")
+            for label, key in zip(action_labels, "tmn[]<>pw")
             if key in available
         ),
         hits,
@@ -557,17 +573,24 @@ def draw_board(
 
 
 def transcript_text(api, project, turn):
-    items = api.request(
-        "transcript", project=project, thread=turn["thread"], turn=turn["turn"]
+    detail = api.request(
+        "transcript", project=project, thread=turn["thread"], turn=turn["turn"],
+        with_summary="true",
     )
+    if isinstance(detail, list):
+        detail = {"items": detail}
     sections = []
-    for item in items:
+    for item in detail["items"]:
         if item["type"] == "commandExecution" and item.get("aggregatedOutput"):
             text = (item.get("command") or "") + "\n" + item["aggregatedOutput"]
         else:
             text = item.get("text") or json.dumps(item, ensure_ascii=False, indent=2)
         sections.append(f"[{item['type']}]\n{text}")
-    return "\n".join(sections) or "No transcript items."
+    summary = detail.get("summary_detail")
+    return (
+        markdown_preview(summary) if summary else (detail.get("summary") or turn.get("summary") or "No summary available."),
+        "\n".join(sections) or "No transcript items.",
+    )
 
 
 def panel(window, level):
@@ -587,6 +610,7 @@ def panel(window, level):
 
 
 def detail_lines(item, width, height):
+    item.height = height
     if item.width != width:
         item.width = width
         item.lines = []
@@ -655,7 +679,7 @@ def draw_editor(window, item, status, hits):
     return cursor
 
 
-def draw_item(window, view, item, status):
+def draw_item(window, view, item, status, *, expanded=False):
     h, w = window.getmaxyx()
     hits = {}
     write(window, 0, 0, axis_path(view, w - 1), w - 1, curses.A_DIM)
@@ -680,7 +704,7 @@ def draw_item(window, view, item, status):
         draw_item_actions(window, [*options, ("Cancel", 27)], hits)
         write(window, h - 1, 0, "1/2/3 set status · Esc cancel", w - 1)
         return hits, None
-    controls = [("Close", curses.KEY_EXIT)]
+    controls = [("Back" if expanded else "Close", curses.KEY_EXIT)]
     if item.confirm:
         controls = [("Cancel", 27), ("Delete", ord("y"))]
     elif item.note and not item.loading:
@@ -691,6 +715,37 @@ def draw_item(window, view, item, status):
             controls.append(("Cut", ord("x")))
         controls.append(("Delete", ord("D")))
     start = draw_item_actions(window, controls, hits)
+    if item.summary is not None:
+        height = h - start - 1
+        minimum = 3 if height >= 6 else 2 if height >= 4 else 1
+        split = start + max(minimum, min(height - minimum, height * 2 // 5))
+        item.pane_rows = start, split
+        for y, end, label, pane, key in (
+            (start, split, "Agent summary", item.summary, "1"),
+            (split, h - 1, "Transcript", item, "2"),
+        ):
+            focused = (pane is item.summary) == item.summary_focused
+            style = curses.A_REVERSE if focused else curses.A_BOLD
+            bordered = end - y >= 3
+            bounds = [(0, w - 1)]
+            if bordered:
+                pane_rule(window, y, bounds, "┌┐")
+                pane_rule(window, end - 1, bounds, "└┘")
+                for row in range(y + 1, end - 1):
+                    pane_sides(window, row, bounds)
+            button = f"[View details] {key}" if w >= 36 else f"[Open] {key}"
+            right = w - 2
+            button_x = right - len(button)
+            write(window, y, 2, f" {label} ", button_x - 3, style)
+            write(window, y, button_x, button, len(button), curses.A_BOLD)
+            hits.update(((y, column), ord(key)) for column in range(button_x, right))
+            text_x = 2 if bordered else 0
+            lines = detail_lines(pane, w - text_x - 2, max(0, end - y - 1 - int(bordered)))
+            for row, line in enumerate(lines, y + 1):
+                write(window, row, text_x, line, w - text_x - 2)
+        footer = item.message or "Tab pane · j/k scroll · Enter details · Esc close"
+        write(window, h - 1, 0, footer, w - 1)
+        return hits, None
     if item.note:
         _, marker, style = NOTE_PRIORITIES.get(item.note.get("priority"), NOTE_PRIORITIES["normal"])
         write(window, start, 0, marker + item.title, w - 1, style or curses.A_BOLD)
@@ -729,6 +784,7 @@ class Terminal:
         self.root = self.view = Board()
         self.item = self.board_job = self.detail_job = self.preview_job = self.mutation = None
         self.detail_request = None
+        self.web_job = None
         self.cut = None
         self.pages = OrderedDict()
         self.details = OrderedDict()
@@ -774,6 +830,13 @@ class Terminal:
         if redraw:
             self.saved_revision = self.state.revision
             self.invalidate_board()
+        if self.web_job is not None and self.web_job.done():
+            try:
+                self.message = "Web journal opened" if self.web_job.result() else "Could not open a browser"
+            except (OSError, RuntimeError, ValueError) as error:
+                self.message = f"Could not open the web journal · {error}"
+            self.web_job = None
+            redraw = True
         if self.board_job is not None and self.board_job[0].done():
             job, key, generation = self.board_job
             self.board_job = None
@@ -810,6 +873,8 @@ class Terminal:
                     result = job.result()
                 except (OSError, RuntimeError) as error:
                     item.message = str(error)
+                    if item.summary is not None:
+                        item.set_content("Transcript unavailable.")
                     if edit and item.note and "body" in item.note:
                         self.edit_item()
                 else:
@@ -822,7 +887,11 @@ class Terminal:
                         self.details.move_to_end(key)
                         while len(self.details) > 10:
                             self.details.popitem(last=False)
-                        if isinstance(result, dict):
+                        if item.summary is not None:
+                            summary, transcript = result
+                            item.summary.set_content(summary)
+                            item.set_content(transcript)
+                        elif isinstance(result, dict):
                             item.note = result
                             item.title = note_title(result)
                             item.set_content("")
@@ -958,14 +1027,21 @@ class Terminal:
             if board is self.view:
                 self.board_hit = window.getbegyx(), window.getmaxyx(), maps
         if self.item:
-            window = panel(win, 2)
-            status = self.state.status(self.item.note["id"]) if self.item.note else ""
-            hits, cursor = draw_item(window, self.view, self.item, status)
-            y, x = window.getbegyx()
-            self.item_hit = (y, x, window.getmaxyx(), hits)
-            if cursor is not None:
-                self.cursor = y + cursor[0], x + cursor[1]
-                win.move(*self.cursor)
+            expanded = self.item.expanded
+            if expanded:
+                source = self.item.summary if self.item.summary_focused else self.item
+                expanded.set_content(source.content)
+            for level, item in enumerate((self.item, expanded), 2):
+                if item is None:
+                    break
+                window = panel(win, level)
+                status = self.state.status(item.note["id"]) if item.note else ""
+                hits, cursor = draw_item(window, self.view, item, status, expanded=item is expanded)
+                y, x = window.getbegyx()
+                self.item_hit = (y, x, window.getmaxyx(), hits)
+                if cursor is not None:
+                    self.cursor = y + cursor[0], x + cursor[1]
+                    win.move(*self.cursor)
         try:
             curses.curs_set(bool(self.cursor))
         except curses.error:
@@ -975,10 +1051,13 @@ class Terminal:
     def open_transcript(self, row):
         if self.view is self.root:
             self.view = self.root.focus(0)
-        title = "Transcript · " + row["prompt"]
+        title = "Turn details · " + row["prompt"]
         key = (*turn_key(row), row.get("revision"))
         cached = self.details.get(key) if row.get("revision") is not None else None
-        self.item = Item(title, cached or "Loading transcript…", loading=cached is None)
+        summary, transcript = cached or (row.get("summary") or "No summary available.", "Loading transcript…")
+        self.item = Item(
+            title, content=transcript, loading=cached is None, summary=TextPane(content=summary)
+        )
         if cached is None:
             self.request_detail(key, False, transcript_text, self.api, self.project, row)
 
@@ -999,8 +1078,8 @@ class Terminal:
         latest = latest | self.state.drafts.get(note["id"], {})
         cached = "body" in latest
         self.item = Item(
-            note_title(latest), "" if cached else "Loading note…", latest,
-            context, loading=not cached, preview_due=time.monotonic() if cached else 0,
+            note_title(latest), note=latest, context=context, content="" if cached else "Loading note…",
+            loading=not cached, preview_due=time.monotonic() if cached else 0,
         )
         if not cached:
             self.request_detail(key, edit, self.state.detail, note)
@@ -1038,6 +1117,10 @@ class Terminal:
         return True
 
     def close_item(self):
+        if self.item.expanded is not None:
+            self.item.expanded = None
+            self.prefix = ""
+            return
         if self.item.editor and self.item.note["id"] in self.state.drafts:
             if not self.save(immediate=True):
                 return
@@ -1071,7 +1154,7 @@ class Terminal:
         )
 
     def detail_key(self, key):
-        item = self.item
+        item = self.item.expanded or self.item
         if key == curses.KEY_EXIT:
             self.close_item()
             return
@@ -1120,6 +1203,13 @@ class Terminal:
                 if priority != item.note["priority"]:
                     self.mutate("set-note-priority", item.note, priority=priority)
             return
+        if item.summary is not None and key in ("1", "2", "\n", "\r"):
+            if key in ("1", "2"):
+                item.summary_focused = key == "1"
+            title = "Agent summary" if item.summary_focused else "Transcript"
+            item.expanded = Item(title)
+            self.prefix = ""
+            return
         if key in ("\x1b", "\n", "\r"):
             self.close_item()
             return
@@ -1136,23 +1226,28 @@ class Terminal:
         if key in ("x", "D") and item.note and item.note.get("version") is not None:
             self.cut_note(key)
             return
-        page = max(1, (self.window.getmaxyx()[0] - 8) // 2)
+        if item.summary is not None and key in ("\t", curses.KEY_BTAB):
+            item.summary_focused = not item.summary_focused
+            self.prefix = ""
+            return
+        pane = item.summary if item.summary_focused and item.summary is not None else item
+        page = max(1, pane.height // 2)
         if key == "g":
             if self.prefix == "g":
-                item.offset = 0
-                item.bottom = False
+                pane.offset = 0
+                pane.bottom = False
                 self.prefix = ""
             else:
                 self.prefix = "g"
             return
         self.prefix = ""
         if key == "G":
-            item.bottom = True
+            pane.bottom = True
         else:
             step = {**MOVE, "j": 1, "k": -1, "d": page, "u": -page}.get(key)
             if step:
-                item.bottom = False
-                item.offset = max(0, min(len(item.lines), item.offset + step))
+                pane.bottom = False
+                pane.offset = max(0, min(len(pane.lines), pane.offset + step))
 
     def cut_note(self, key):
         if key == "D":
@@ -1195,9 +1290,7 @@ class Terminal:
         else:
             if not project:
                 self.view.legacy_newer_pages = ()
-            if self.view.active == 1:
-                self.view.query["edge"] = position + "-note"
-            elif position == "first":
+            if position == "first" or self.view.active == 1:
                 self.view.query[prefix + "edge"] = position
         self.view.note_ids.pop(self.view.active, None)
         if project:
@@ -1218,19 +1311,23 @@ class Terminal:
         self.select_page_end(axis, position in ("first", "later"), turns, turn_notes, project_notes)
 
     def select_page_end(self, axis, first, turns, turn_notes, project_notes):
-        notes = notes_in_turn_order(turns, turn_notes) if axis == 1 else project_notes
-        if axis in (1, 2) and notes:
-            selected = notes[0 if first else -1]
-            self.view.note_ids[axis] = selected["id"]
-            if axis == 1:
-                self.view.turn = turn_key(selected)
-        elif turns and axis != 2:
-            self.view.turn = turn_key(turns[0 if first else -1])
+        index = 0 if first else -1
+        if axis == 2 and project_notes:
+            self.view.note_ids[axis] = project_notes[index]["id"]
+        elif axis == 1 and turns:
+            select_turn_note(self.view, turn_note_entries(turns, turn_notes)[index])
+        elif axis == 0 and turns:
+            self.view.turn = turn_key(turns[index])
 
     def list_key(self, key, clicked=None):
         data, turns, _, turn_notes, project_notes = self.data(self.view)
         if key == "q":
             return False
+        if key == "w":
+            if self.web_job is None:
+                self.web_job = background(open_web, self.api, self.project)
+                self.message = "Opening the web journal…"
+            return True
         if key == "\x1b":
             self.view = self.root
             self.message = ""
@@ -1243,7 +1340,6 @@ class Terminal:
             axis = int(key) - 1
             if self.view is self.root:
                 self.view = self.root.focus(axis)
-                focus_axis(self.view, axis, turns, turn_notes)
             else:
                 self.view.toggle(axis)
             return True
@@ -1254,7 +1350,7 @@ class Terminal:
             if key in ("\t", curses.KEY_BTAB):
                 target %= len(axes)
             if 0 <= target < len(axes):
-                focus_axis(self.view, axes[target], turns, turn_notes)
+                self.view.active = axes[target]
             self.prefix = ""
             return True
         axis = self.view.active
@@ -1277,11 +1373,12 @@ class Terminal:
                 picked = note_in(items, self.view.note_ids.get(axis), latest=True)
                 identifier = picked["id"] if picked else None
             elif axis == 1:
-                items = notes_in_turn_order(turns, turn_notes)
-                identifier = self.view.note_ids.get(axis)
-                if identifier is None:
-                    attached = turn_notes.get(self.view.turn, [])
-                    identifier = attached[0]["id"] if attached else None
+                entries = turn_note_entries(turns, turn_notes)
+                if entries:
+                    current = selected_turn_note(self.view, turn_notes)
+                    index = entries.index(current) if current in entries else len(entries) - 1
+                    select_turn_note(self.view, entries[max(0, min(index + step, len(entries) - 1))])
+                return True
             else:
                 items = turns
                 identifier = self.view.turn
@@ -1317,7 +1414,7 @@ class Terminal:
         if axis == 2:
             items, offset = project_notes, "project_top"
         elif standalone_notes:
-            items, offset = notes_in_turn_order(turns, turn_notes), "note_top"
+            items, offset = turn_note_entries(turns, turn_notes), "note_top"
         else:
             items, offset = turns, "top"
         heights = maps.heights.get(axis, [])
@@ -1327,7 +1424,10 @@ class Terminal:
         first = max(0, min(len(items) - 1, getattr(self.view, offset) + step))
         top, visible = card_window(heights, first, first, maps.end - maps.start)
         setattr(self.view, offset, top)
-        if axis == 2 or standalone_notes:
+        if standalone_notes:
+            selected = selected_turn_note(self.view, turn_notes)
+            keys = items
+        elif axis == 2:
             selected = self.view.note_ids.get(axis)
             keys = [item["id"] for item in items]
         else:
@@ -1335,9 +1435,11 @@ class Terminal:
             keys = [turn_key(item) for item in items]
         index = keys.index(selected) if selected in keys else (visible.stop - 1 if step < 0 else top)
         choice = items[max(top, min(index, visible.stop - 1))]
-        if axis == 2 or standalone_notes:
+        if standalone_notes:
+            select_turn_note(self.view, choice)
+        elif axis == 2:
             self.view.note_ids[axis] = choice["id"]
-        if axis != 2:
+        else:
             self.view.turn = turn_key(choice)
 
     def mouse_key(self):
@@ -1351,9 +1453,18 @@ class Terminal:
             top, left, (height, width), hits = self.item_hit
             if not (left <= x < left + width and top <= y < top + height):
                 return None, None
+            hit = hits.get((y - top, x - left))
+            item = self.item.expanded or self.item
+            summary_row, transcript_row = item.pane_rows
+            if item.summary is not None and not hit and summary_row <= y - top < height - 1:
+                summary_focused = y - top < transcript_row
+                if summary_focused != item.summary_focused:
+                    self.prefix = ""
+                    item.summary_focused = summary_focused
+                if not key:
+                    return "", None
             if key:
                 return key, None
-            hit = hits.get((y - top, x - left))
             return (chr(hit) if hit and hit < 256 else hit), None
         if not self.board_hit:
             return None, None
@@ -1397,8 +1508,9 @@ class Terminal:
                 data, turns, _, turn_notes, project_notes = self.data(self.view)
                 self.finish_jump(data, turns, turn_notes, project_notes)
             status = self.state.status(self.item.note["id"]) if self.item and self.item.note else None
-            needs_lines = self.item and self.item.wrapping is not None and (
-                self.item.bottom or len(self.item.lines) <= self.item.offset
+            needs_lines = self.item and any(
+                pane.wrapping is not None and (pane.bottom or len(pane.lines) <= pane.offset)
+                for pane in (self.item, self.item.summary, self.item.expanded) if pane is not None
             )
             if dirty or status != last_status or needs_lines:
                 self.draw()

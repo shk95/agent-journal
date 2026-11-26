@@ -12,7 +12,9 @@ from importlib.metadata import version
 from pathlib import Path
 from time import time
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 from uuid import UUID
 
 from mcp import Client
@@ -138,7 +140,9 @@ class TestJournal(unittest.TestCase):
             }
             self.assertTrue(self.api.request("turns", record)["accepted"])
             records.append(record)
-        updated = records[-1] | {"summary": "Updated fixture", "revision": 2}
+        updated = records[-1] | {
+            "summary": "Updated fixture", "summary_detail": "상세 결과", "revision": 2,
+        }
         self.api.request("turns", updated)
         self.api.request("turns", records[-1] | {"summary": "Stale " * 30})
         records[-1] = updated
@@ -148,6 +152,7 @@ class TestJournal(unittest.TestCase):
                 json.dumps(record["items"], ensure_ascii=False)
                 + record["prompt"]
                 + record["summary"]
+                + record.get("summary_detail", "")
             )
             return len(text.encode())
 
@@ -363,9 +368,9 @@ class TestJournal(unittest.TestCase):
                 )
 
     def test_web_command_opens_configured_journal(self):
-        for options, fragment in (
-            ([], ""),
-            (["--project", "Test/P"], "#test%2Fp"),
+        for options, project, fragment in (
+            ([], "", ""),
+            (["--project", "Test/P"], "test/p", "#test%2Fp"),
         ):
             with (
                 self.subTest(options=options),
@@ -375,8 +380,52 @@ class TestJournal(unittest.TestCase):
             ):
                 main()
                 url = self.api.base + "/" + fragment
-                open_tab.assert_called_once_with(url)
                 print_url.assert_called_once_with(url, flush=True)
+                open_tab.assert_called_once()
+                opened = open_tab.call_args.args[0]
+                root, login = opened.split("#login?", 1)
+                self.assertEqual(root, self.api.base + "/")
+                fields = parse_qs(login, keep_blank_values=True)
+                self.assertEqual(fields["project"], [project])
+                self.assertNotIn(self.api.token, opened)
+                request = Request(
+                    root + "api/login", json.dumps({"code": fields["code"][0]}).encode(),
+                    headers={"Content-Type": "application/json", "X-Forwarded-Proto": "https"},
+                )
+                with urlopen(request) as response:
+                    session, *attributes = response.headers["Set-Cookie"].split("; ")
+                self.assertIn("HttpOnly", attributes)
+                self.assertIn("SameSite=Strict", attributes)
+                self.assertIn("Secure", attributes)
+                self.assertIn("Max-Age=31536000", attributes)
+                with urlopen(Request(root + "api/projects", headers={"Cookie": session})) as response:
+                    self.assertEqual(json.load(response)[0]["project"], "test/p")
+                with self.assertRaises(HTTPError) as replayed:
+                    urlopen(request)
+                self.assertEqual(replayed.exception.code, 401)
+                with self.assertRaises(HTTPError) as cookie_only:
+                    urlopen(Request(root + "api/browser-login", b"{}", headers={
+                        "Content-Type": "application/json", "Cookie": session,
+                    }))
+                self.assertEqual(cookie_only.exception.code, 401)
+
+    def test_web_command_opens_plain_url_with_an_older_server(self):
+        with (
+            patch.object(sys, "argv", ["agent-journal", "web"]),
+            patch.object(Api, "request", side_effect=JournalHTTPError(400, "Invalid project")),
+            patch("webbrowser.open_new_tab") as open_tab,
+            patch("builtins.print") as print_url,
+        ):
+            main()
+        url = self.api.base + "/"
+        open_tab.assert_called_once_with(url)
+        print_url.assert_called_once_with(url, flush=True)
+
+    def test_browser_login_code_expires(self):
+        with patch("agent_journal.server.BROWSER_LOGIN_TTL", 0):
+            code = self.api.request("browser-login", {})["code"]
+        with self.assertRaisesRegex(JournalHTTPError, "401"):
+            self.api.request("login", {"code": code})
 
     def test_first_web_run_connects_before_opening_the_browser(self):
         saved = self.path / "connection.json"
@@ -398,7 +447,9 @@ class TestJournal(unittest.TestCase):
             open_tab.assert_not_called()
             main()
             self.assertTrue(saved.exists())
-            open_tab.assert_called_once_with(self.api.base + "/")
+            open_tab.assert_called_once()
+            fragment = urlsplit(open_tab.call_args.args[0]).fragment
+            self.assertTrue(fragment.startswith("login?code="))
             main()
             self.assertEqual(open_tab.call_count, 2)
             self.assertEqual(url_prompt.call_count, 2)
@@ -511,13 +562,44 @@ class TestJournal(unittest.TestCase):
             reopened.flush(self.api)
         finally:
             reopened.db.close()
-        while work_once(self.cache.db, lambda context: "semantic result"):
+        while work_once(self.cache.db, lambda record, previous: {
+            "summary": "semantic result", "summary_detail": "The fixture confirmed the result.",
+        }):
             pass
         self.cache.flush(self.api)
         self.api.request("turns", payload)
         self.assertEqual(
             [r["summary"] for r in self.rows()], ["semantic result", "semantic result"]
         )
+        detail = self.api.request("transcript", project="test/p", thread="a", turn="one", with_summary="true")
+        self.assertEqual(detail["summary_detail"], "The fixture confirmed the result.")
+        self.assertEqual(detail["items"], self.api.request("transcript", project="test/p", thread="a", turn="one"))
+
+    def test_summary_context_crosses_pages_within_the_collection_period(self):
+        start = int(self.since) + 1
+        self.source.projects = {"a": "p"}
+        self.source.turns = {"a": [
+            turn("uncollected", start - 2, "Uncollected request"),
+            *(turn(f"sample-{i}", start + i, f"Request {i}", f"Result {i}") for i in range(8)),
+        ]}
+        original_pages = self.source.pages
+
+        def small_pages(method, params):
+            for rows in original_pages(method, params):
+                for index in range(0, len(rows), 2):
+                    yield rows[index : index + 2]
+
+        with patch.object(self.source, "pages", small_pages):
+            scan(self.source, self.cache)
+        contexts = {
+            key: json.loads(context)["previous"]
+            for key, context in self.cache.db.execute("SELECT turn,context FROM summaries")
+        }
+        self.assertEqual(contexts["sample-0"], [])
+        self.assertEqual(contexts["sample-7"], [
+            {"request": f"Request {index}", "answer": f"Result {index}"}
+            for index in range(1, 7)
+        ])
 
     def test_registration_boundary_and_reenable(self):
         scan(self.source, self.cache)
@@ -558,15 +640,17 @@ class TestJournal(unittest.TestCase):
     def test_slow_summary_cannot_replace_newer_turn(self):
         scan(self.source, self.cache)
 
-        def finish_old_job(context):
+        def finish_old_job(record, previous):
             self.source.turns["a"][-1]["items"][-1]["text"] = "revised final"
             scan(self.source, self.cache)
-            return "obsolete summary"
+            return {"summary": "obsolete summary", "summary_detail": "Obsolete detail."}
 
         self.assertTrue(work_once(self.cache.db, finish_old_job))
         self.cache.flush(self.api)
         self.assertEqual(self.rows()[0]["summary"], "revised final")
-        while work_once(self.cache.db, lambda ctx: "latest summary"):
+        while work_once(self.cache.db, lambda record, previous: {
+            "summary": "latest summary", "summary_detail": "Latest detail.",
+        }):
             pass
         self.cache.flush(self.api)
         self.assertEqual(self.rows()[0]["summary"], "latest summary")

@@ -10,6 +10,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
 from pathlib import Path
+from threading import Lock
 from urllib.parse import parse_qs, urlsplit
 
 from .common import OBSERVATION_LEASE, PROJECT, SERVER_VERSION_HEADER, turn_start
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS notes(
 """
 STATIC = Path(__file__).parent / "static"
 SERVER_VERSION = version("agent-journal")
+BROWSER_LOGIN_TTL = 60
+BROWSER_SESSION_MAX_AGE = 365 * 24 * 60 * 60
 STORAGE_WINDOW_DAYS = 30
 
 
@@ -371,12 +374,15 @@ def endpoint(db, method, path, args):
         return read_note(db, project, args["id"])
     if method == "GET" and path == "transcript":
         row = db.execute(
-            "SELECT items FROM turns WHERE project=? AND thread=? AND turn=?",
+            "SELECT items,summary,summary_detail FROM turns WHERE project=? AND thread=? AND turn=?",
             (project, args["thread"], args["turn"]),
         ).fetchone()
         if not row:
             raise KeyError("Turn not found")
-        return json.loads(row["items"])
+        items = json.loads(row["items"])
+        if args.get("with_summary") == "true":
+            return {"items": items, "summary": row["summary"], "summary_detail": row["summary_detail"]}
+        return items
     if path == "notes" and method == "GET":
         sql = f"SELECT {NOTE_COLUMNS} FROM notes WHERE project=?"
         values = [project]
@@ -490,11 +496,15 @@ def endpoint(db, method, path, args):
             return {"accepted": False}
         if args["status"] not in ("inProgress", "completed", "failed", "interrupted"):
             raise ValueError("Invalid turn status")
+        summary_detail = args.get("summary_detail", "")
+        if not isinstance(summary_detail, str) or len(summary_detail) > 12_000:
+            raise ValueError("Expected a summary detail of up to 12,000 characters")
         db.execute(
-            """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,parent,items,revision,updated,parent_turn)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,parent,items,revision,updated,parent_turn,summary_detail)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(project,thread,turn) DO UPDATE SET
                     status=excluded.status,prompt=excluded.prompt,summary=excluded.summary,
+                    summary_detail=excluded.summary_detail,
                     started=excluded.started,parent=excluded.parent,parent_turn=excluded.parent_turn,
                     items=excluded.items,revision=excluded.revision,
                     updated=COALESCE(excluded.updated,turns.updated)
@@ -513,6 +523,7 @@ def endpoint(db, method, path, args):
                 args["revision"],
                 time.time() if args.get("observed", True) else None,
                 args.get("parent_turn"),
+                summary_detail,
             ),
         )
         return {"accepted": True}
@@ -583,15 +594,17 @@ class JournalHandler(BaseHTTPRequestHandler):
         ).hexdigest()
         header = self.headers.get("Authorization", "")
         login = url.path == "/api/login" and self.command == "POST"
-        authenticated = secrets.compare_digest(
+        bearer = secrets.compare_digest(
             header.encode(), ("Bearer " + token).encode()
-        ) or (
+        )
+        authenticated = bearer or (
             cookie_name in cookie
             and secrets.compare_digest(
                 cookie[cookie_name].value.encode(), session.encode()
             )
         )
-        if not login and not authenticated:
+        issue_login = url.path == "/api/browser-login" and self.command == "POST"
+        if (issue_login and not bearer) or (not login and not authenticated):
             return self.reply(401, {"error": "Authentication required"})
         if not url.path.startswith("/api/"):
             return self.reply(404, {})
@@ -600,16 +613,30 @@ class JournalHandler(BaseHTTPRequestHandler):
             if self.headers.get_content_type() != "application/json":
                 return self.reply(415, {"error": "Expected JSON"})
             length = int(self.headers.get("Content-Length", "0"))
-            limit = 4096 if login else 64 * 1024 * 1024
+            limit = 4096 if login or issue_login else 64 * 1024 * 1024
             if not 0 < length <= limit:
                 return self.reply(413, {"error": "Invalid body length"})
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("Expected JSON object")
+        if issue_login:
+            code = secrets.token_urlsafe(32)
+            with self.server.browser_login_lock:
+                now = time.monotonic()
+                self.server.browser_logins = {
+                    key: expiry for key, expiry in self.server.browser_logins.items() if expiry > now
+                }
+                self.server.browser_logins[code] = now + BROWSER_LOGIN_TTL
+            return self.reply(200, {"code": code})
         if login:
-            if not secrets.compare_digest(
-                str(body.get("token", "")).encode(), token.encode()
-            ):
+            max_age = ""
+            if "code" in body:
+                with self.server.browser_login_lock:
+                    expiry = self.server.browser_logins.pop(str(body["code"]), 0)
+                if expiry <= time.monotonic():
+                    return self.reply(401, {"error": "Invalid or expired browser sign-in"})
+                max_age = f"; Max-Age={BROWSER_SESSION_MAX_AGE}"
+            elif not secrets.compare_digest(str(body.get("token", "")).encode(), token.encode()):
                 return self.reply(401, {"error": "Invalid token"})
             secure = (
                 "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
@@ -618,7 +645,9 @@ class JournalHandler(BaseHTTPRequestHandler):
                 200,
                 {},
                 headers={
-                    "Set-Cookie": f"{cookie_name}={session}; HttpOnly; SameSite=Strict; Path=/{secure}"
+                    "Set-Cookie": (
+                        f"{cookie_name}={session}; HttpOnly; SameSite=Strict; Path=/{secure}{max_age}"
+                    )
                 },
             )
         args = {k: v[0] for k, v in parse_qs(url.query).items()} | body
@@ -677,9 +706,14 @@ def make_server(
         db.executescript(SCHEMA)
         with db:
             db.execute("BEGIN IMMEDIATE")
+            turn_fields = {row["name"] for row in db.execute("PRAGMA table_xinfo(turns)")}
+            if "body_bytes" in turn_fields and "summary_detail" not in turn_fields:
+                db.execute("DROP INDEX IF EXISTS turn_storage")
+                db.execute("ALTER TABLE turns DROP COLUMN body_bytes")
             for table, field, definition in (
                 ("turns", "updated", "REAL"),
                 ("turns", "parent_turn", "TEXT"),
+                ("turns", "summary_detail", "TEXT NOT NULL DEFAULT ''"),
                 ("notes", "version", "INTEGER NOT NULL DEFAULT 1"),
                 ("notes", "title", "TEXT NOT NULL DEFAULT ''"),
                 (
@@ -690,7 +724,7 @@ def make_server(
                     "turns",
                     "body_bytes",
                     "INTEGER AS (length(CAST(items AS BLOB)) + length(CAST(prompt AS BLOB))"
-                    " + length(CAST(summary AS BLOB))) VIRTUAL",
+                    " + length(CAST(summary AS BLOB)) + length(CAST(summary_detail AS BLOB))) VIRTUAL",
                 ),
                 ("notes", "body_bytes", "INTEGER AS (length(CAST(body AS BLOB))) VIRTUAL"),
             ):
@@ -728,5 +762,7 @@ def make_server(
     server.token, server.database = token, database
     server.deployment_probe_key = deployment_probe_key
     server.browser_cookie = "journal"
+    server.browser_login_lock = Lock()
+    server.browser_logins = {}
     server.deployment_id, server.maintenance_file = deployment_id, maintenance_file
     return server

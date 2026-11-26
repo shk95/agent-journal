@@ -460,6 +460,65 @@ dialog header {
 #modalBody {
   padding: 18px 20px;
 }
+dialog.transcript-detail[open], #turnPaneDetail[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(760px, 82vh);
+  overflow: hidden;
+}
+#turnPaneDetail[open] {
+  width: min(960px, 96vw);
+  height: min(840px, 90vh);
+  max-height: 90vh;
+}
+#turnPaneDetail > .turn-detail-scroll {
+  padding: 16px 20px;
+}
+.transcript-detail #modalBody {
+  min-height: 0;
+  padding: 0;
+}
+.turn-detail-panes {
+  display: grid;
+  grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+  gap: 12px;
+  height: 100%;
+  padding: 12px;
+}
+.turn-detail-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.turn-detail-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #eff1e9;
+}
+.turn-detail-heading > h2 {
+  margin: 0;
+  font-size: 14px;
+}
+.turn-detail-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 8px 20px 14px;
+  overflow-wrap: anywhere;
+}
+.turn-detail-scroll:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+}
+.turn-detail-scroll > :first-child {
+  margin-top: 0;
+}
 pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

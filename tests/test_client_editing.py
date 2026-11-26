@@ -30,6 +30,24 @@ class FixtureApi:
 
 
 class EditingTests(unittest.TestCase):
+    def test_terminal_opens_web_with_the_current_connection(self):
+        api = FixtureApi()
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"AGENT_JOURNAL_HOME": directory}),
+            patch("agent_journal.tui.terminal_palette", return_value=([], 0)),
+            patch.object(api, "request", return_value={"code": "fixture-code"}) as request,
+            patch("webbrowser.open_new_tab", return_value=True) as open_tab,
+        ):
+            terminal = Terminal(None, api, "example/fixture")
+            terminal.refresh_after["{}"] = float("inf")
+            self.assertTrue(terminal.list_key("w"))
+            terminal.web_job.result(timeout=2)
+            terminal.poll()
+            request.assert_called_once_with("browser-login", {})
+            open_tab.assert_called_once_with(api.base + "/#login?code=fixture-code&project=example%2Ffixture")
+            self.assertEqual(terminal.message, "Web journal opened")
+
     def test_terminal_keeps_only_latest_waiting_detail_request(self):
         first, latest = Future(), Future()
         with (
@@ -45,14 +63,15 @@ class EditingTests(unittest.TestCase):
                     terminal.close_item()
                 terminal.open_transcript({"thread": "session", "turn": turn, "prompt": turn})
             self.assertEqual(background.call_count, 1)
-            first.set_result("Old result")
+            first.set_result(("Old summary", "Old result"))
             terminal.poll()
             self.assertEqual(background.call_count, 2)
             self.assertEqual(background.call_args.args[-1]["turn"], "latest")
             self.assertTrue(terminal.item.loading)
-            latest.set_result("New result")
+            latest.set_result(("New summary", "New result"))
             terminal.poll()
             self.assertEqual(terminal.item.content, "New result")
+            self.assertEqual(terminal.item.summary.content, "New summary")
 
     def test_terminal_reopens_acknowledged_text_from_a_stale_board(self):
         with (

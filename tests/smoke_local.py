@@ -18,10 +18,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote, urlencode
 
 from agent_journal.codex_integration import collector_lock
 from agent_journal.common import Api
 from agent_journal.observer import Codex
+from agent_journal.summary import LEVELS
 from scripts.dev import FIXTURE, seed
 from tests.processes import (
     child, cleanup_on_termination, observer_groups, startup_line, stop_group, stop_tmux,
@@ -34,12 +36,18 @@ TASK = "Verify the sample import."
 NOTE_TASK = "Attach a note to the previous result."
 ANSWER = "The sample import passed."
 SUMMARY = "Verified the sample import."
+SUMMARY_DETAIL = "The user asked to verify the sample import. The sample import passed."
 NOTE_SUMMARY = "Attached a regression note to the sample import."
 NOTE = "Keep a regression case."
 EDIT = "Keep the regression fixture with the import."
 PROJECT_NOTE = "Review other import formats later."
 MOUSE_NOTE = "Keep the input in the example."
 MOUSE_EDIT = "Save the input with its example."
+SUMMARY_MODEL = "gpt-5.4"
+SUMMARY_CHOICES = {
+    level: {"model": SUMMARY_MODEL, "effort": effort}
+    for level, effort in zip(LEVELS, ("low", "medium", "high"))
+}
 
 
 def legacy_browser_pages(browser, api, cookies):
@@ -120,13 +128,21 @@ class FixtureModel(BaseHTTPRequestHandler):
             if item.get("type") == "function_call_output"
         }
         name = call_id = None
-        if "observations for the journal" in serialized:
+        if "Review the Agent Journal summary levels" in serialized:
+            answer = json.dumps(SUMMARY_CHOICES)
+        elif "observations for the journal" in serialized:
+            self.server.summary_efforts.append((data.get("reasoning") or {}).get("effort"))
             if NOTE_TASK in serialized:
                 self.server.note_summary_started.set()
                 self.server.release_note_summary.wait(timeout=15)
-                answer = NOTE_SUMMARY
+                answer = json.dumps({"summary": NOTE_SUMMARY, "summary_detail": NOTE_SUMMARY})
             else:
-                answer = SUMMARY
+                answer = json.dumps({
+                    "summary": SUMMARY,
+                    "summary_detail": SUMMARY_DETAIL + "\n\n" + "\n\n".join(
+                        f"Fixture observation {number}." for number in range(18)
+                    ),
+                })
         elif REGISTER_TASK in serialized:
             if "fixture-register" not in outputs:
                 name, call_id = "register_project", "fixture-register"
@@ -345,6 +361,14 @@ def check_clients(path, repo, cli, env, api, channel):
         send("l")
         wait_for("the note on the same turn selected with l", lambda:
                  re.search(r"› (?:\[\d+/\d+\] )?" + re.escape(NOTE), screen()))
+        send("j")
+        wait_for("the empty turn selected in the paired notes column", lambda:
+                 any(NOTE_TASK in line and "› No turn notes" in line for line in screen().splitlines()))
+        send("m")
+        wait_for("the empty turn's note editor", lambda: "Insert ·" in screen())
+        send("Escape", "Escape", "k")
+        wait_for("the note selected again", lambda:
+                 re.search(r"› (?:\[\d+/\d+\] )?" + re.escape(NOTE), screen()))
         send("l", "Enter")
         wait_for("the rightmost axis to stay active", lambda: "Turn note · " + TASK in screen())
         send("Escape", "h")
@@ -353,6 +377,17 @@ def check_clients(path, repo, cli, env, api, channel):
         click_label("[Transcript]")
         wait_for("the clicked turn's transcript and its parent", lambda:
                  ANSWER in screen() and action_bar("[Close] Esc") and "Axes ·" in screen())
+        detail_rows = screen().splitlines()
+        summary_row = next(i for i, row in enumerate(detail_rows) if "[View details] 1" in row)
+        transcript_row = next(i for i, row in enumerate(detail_rows) if "[View details] 2" in row)
+        assert summary_row < transcript_row
+        assert "Agent summary" in detail_rows[summary_row] and "┌" in detail_rows[summary_row]
+        assert "Transcript" in detail_rows[transcript_row] and "┌" in detail_rows[transcript_row]
+        send("G")
+        wait_for("the bottom of the summary", lambda: "Fixture observation 17." in screen())
+        send("Tab", "G")
+        wait_for("the transcript to leave the summary scroll position alone", lambda:
+                 "Fixture observation 17." in screen() and ANSWER in screen())
         layers = screen().rstrip("\n").splitlines()
         for row in (3, 6):
             if not re.fullmatch("┌─+┐", layers[row]):
@@ -363,6 +398,19 @@ def check_clients(path, repo, cli, env, api, channel):
             and re.fullmatch("└─+┘", layers[-1])
         ):
             raise RuntimeError("Only the top edges of parent layers should remain visible")
+        click_label("[View details] 1")
+        wait_for("the expanded summary", lambda: action_bar("[Back] Esc") and SUMMARY_DETAIL in screen())
+        send("Escape")
+        wait_for("the summary preview's restored scroll position", lambda:
+                 "[View details] 1" in screen() and "Fixture observation 17." in screen())
+        send("Tab", "Enter")
+        wait_for("the expanded transcript", lambda:
+                 action_bar("[Back] Esc") and "│Transcript " in screen() and "[userMessage]" in screen())
+        send("G")
+        wait_for("the bottom of the expanded transcript", lambda: ANSWER in screen())
+        click_label("[Back] Esc")
+        wait_for("both detail boxes after closing the transcript", lambda:
+                 "[View details] 1" in screen() and "[View details] 2" in screen())
         send("d", "u", "G", "g", "g")
         click_label("[Close]")
         wait_for("the restored axes", lambda:
@@ -424,6 +472,9 @@ def check_clients(path, repo, cli, env, api, channel):
         wait_for("the project axis after editing", lambda: axis("3 Project notes") and "[Close]" not in screen())
         send("Escape", "2")
         wait_for("the turn notes axis", lambda: axis("2 Turn notes"))
+        send("G")
+        wait_for("the empty turn selected in standalone Turn notes", lambda:
+                 "› No turn notes" in screen() and NOTE_TASK in screen())
         send("g", "g")
         wait_for(
             "the first turn note selected",
@@ -438,6 +489,17 @@ def check_clients(path, repo, cli, env, api, channel):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=channel)
             try:
+                with browser.new_context() as context:
+                    direct = context.new_page()
+                    code = api.request("browser-login", {})["code"]
+                    direct.goto(api.base + "/#login?" + urlencode({"code": code, "project": PROJECT}))
+                    direct.get_by_role("heading", name=PROJECT, exact=True).wait_for()
+                    assert direct.url == api.base + "/#" + quote(PROJECT, safe="")
+                    assert not direct.get_by_label("Server access token").is_visible()
+                    cookie = next(cookie for cookie in context.cookies() if cookie["name"] == "journal")
+                    assert cookie["expires"] > time.time()
+                    direct.reload()
+                    direct.get_by_role("heading", name=PROJECT, exact=True).wait_for()
                 page = browser.new_page()
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
@@ -454,6 +516,18 @@ def check_clients(path, repo, cli, env, api, channel):
                 assert linked_note.evaluate("(note) => document.activeElement === note")
                 page.keyboard.press("h")
                 assert linked_turn.evaluate("(turn) => document.activeElement === turn")
+                empty_turn = page.locator(".board-card.paired").filter(has_text=NOTE_TASK)
+                page.keyboard.press("j")
+                page.keyboard.press("l")
+                assert empty_turn.get_by_role("button", name="+ Note", exact=True).evaluate(
+                    "(button) => document.activeElement === button"
+                )
+                page.keyboard.press("k")
+                assert page.get_by_role("button", name=title, exact=True).evaluate(
+                    "(note) => document.activeElement === note"
+                )
+                page.keyboard.press("k")
+                assert linked_note.evaluate("(note) => document.activeElement === note")
                 page.get_by_role("button", name="Untitled note", exact=True).wait_for()
                 page.get_by_role("button", name=title, exact=True).click()
                 page.get_by_role("group", name="Note actions").get_by_role("button", name="Edit").wait_for()
@@ -498,10 +572,45 @@ def check_clients(path, repo, cli, env, api, channel):
                 }""")
                 linked_turn.click()
                 page.get_by_text("Loading transcript…", exact=True).wait_for()
-                page.get_by_role("button", name="Close", exact=True).click()
+                detail = page.get_by_role("dialog", name="Turn details")
+                detail.get_by_role("region", name="Transcript", exact=True).get_by_role(
+                    "button", name="View details"
+                ).click()
+                expanded = page.get_by_role("dialog", name="Transcript", exact=True)
+                expanded.get_by_text("Loading transcript…", exact=True).wait_for()
+                page.keyboard.press("Escape")
+                detail.get_by_text("Loading transcript…", exact=True).wait_for()
+                assert not page.evaluate("window.fixtureTranscriptAborted === true")
+                detail.get_by_role("button", name="Close", exact=True).click()
                 page.wait_for_function("window.fixtureTranscriptAborted === true")
                 page.locator(".rowbtn").filter(has_text=TASK).first.click()
-                page.locator("dialog").get_by_text(ANSWER, exact=True).wait_for()
+                dialog = page.get_by_role("dialog")
+                summary = dialog.get_by_role("region", name="Agent summary")
+                transcript = dialog.get_by_role("region", name="Transcript", exact=True)
+                summary.get_by_text(SUMMARY_DETAIL, exact=True).wait_for()
+                transcript.get_by_text(ANSWER, exact=True).wait_for()
+                assert summary.bounding_box()["y"] < transcript.bounding_box()["y"]
+                summary_scroll = summary.locator(".turn-detail-scroll")
+                transcript_scroll = transcript.locator(".turn-detail-scroll")
+                summary_scroll.focus()
+                page.keyboard.press("G")
+                summary_top = summary_scroll.evaluate("(pane) => pane.scrollTop")
+                assert summary_top > 0
+                assert transcript_scroll.evaluate("(pane) => pane.scrollTop") == 0
+                summary_button = summary.get_by_role("button", name="View details")
+                summary_button.click()
+                expanded = page.get_by_role("dialog", name="Agent summary", exact=True)
+                expanded.get_by_text(SUMMARY_DETAIL, exact=True).wait_for()
+                assert page.locator("#detail").evaluate("(dialog) => dialog.open")
+                page.keyboard.press("Escape")
+                expanded.wait_for(state="hidden")
+                assert summary_scroll.evaluate("(pane) => pane.scrollTop") == summary_top
+                assert summary_button.evaluate("(button) => document.activeElement === button")
+                transcript.get_by_role("button", name="View details").click()
+                expanded = page.get_by_role("dialog", name="Transcript", exact=True)
+                expanded.get_by_text(ANSWER, exact=True).wait_for()
+                expanded.get_by_role("button", name="Back", exact=True).click()
+                dialog.get_by_role("region", name="Agent summary").wait_for()
                 page.get_by_role("button", name="Close", exact=True).click()
                 page.get_by_label("Journey", exact=True).uncheck()
                 page.locator(".rowbtn").first.wait_for(state="detached")
@@ -691,6 +800,7 @@ def smoke(path, binary, channel, cli):
     settings = {
         "AGENT_JOURNAL_HOME": str(path / "journal"),
         "AGENT_JOURNAL_TOKEN": secrets.token_urlsafe(24),
+        "AGENT_JOURNAL_SUMMARY_MODEL": "",
     }
     environment = {
         key: value
@@ -708,6 +818,7 @@ def smoke(path, binary, channel, cli):
     ):
         provider.note_summary_started = threading.Event()
         provider.release_note_summary = threading.Event()
+        provider.summary_efforts = []
         provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
         provider_thread.start()
         try:
@@ -756,10 +867,20 @@ def smoke(path, binary, channel, cli):
                 )
             # The summary worker still launches Codex. The wrapper selects the same local model.
             wrapper = path / "codex"
+            catalog = {"models": [{
+                "slug": SUMMARY_MODEL, "visibility": "list", "description": "Synthetic model",
+                "supported_reasoning_levels": [
+                    {"effort": choice["effort"]} for choice in SUMMARY_CHOICES.values()
+                ],
+            }]}
             wrapper.write_text(
-                "#!/bin/sh\nexec " + shlex.join([binary, *config]) + ' "$@"\n'
+                "#!/bin/sh\n"
+                'if [ "$1 $2" = "debug models" ]; then\n'
+                + shlex.join(["printf", "%s\n", json.dumps(catalog)]) + "\nexit 0\nfi\n"
+                + "exec " + shlex.join([binary, *config]) + ' "$@"\n'
             )
             wrapper.chmod(0o700)
+            subprocess.run([cli, "summary", "높음"], env=environment, check=True)
             codex_env = environment | {
                 "PATH": os.pathsep.join((str(path), str(fixture_bin), environment["PATH"])),
                 "AGENT_JOURNAL_URL": "",
@@ -884,6 +1005,7 @@ def smoke(path, binary, channel, cli):
                         "the separate Codex summary",
                         lambda: recorded(turn, status="completed", summary=SUMMARY),
                     )
+                    assert "high" in provider.summary_efforts
                     marker_dir = Path(settings["AGENT_JOURNAL_HOME"]) / "codex-sessions"
                     wait_for(
                         "three Codex session markers",

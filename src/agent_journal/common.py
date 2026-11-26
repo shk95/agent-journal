@@ -4,9 +4,10 @@ import os
 import re
 import subprocess
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
@@ -172,3 +173,16 @@ class Api:
             raise JournalHTTPError(
                 err.code, err.read(400).decode(errors="replace")
             ) from err
+
+
+def open_web(api, project="", *, print_url=False):
+    import webbrowser
+
+    root = api.base + "/"
+    url = root + ("#" + quote(project, safe="") if project else "")
+    if print_url:
+        print(url, flush=True)
+    with suppress(OSError, JournalHTTPError):
+        code = api.request("browser-login", {})["code"]
+        url = root + "#login?" + urlencode({"code": code, "project": project})
+    return webbrowser.open_new_tab(url)

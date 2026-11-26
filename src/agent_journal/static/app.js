@@ -26,6 +26,7 @@ let sessionControls = null;
 let activeRequest = null;
 let modalTrigger = null;
 let detailRequest = null;
+let expandedTurnPane = null;
 const readCache = new Map();
 const detailCache = new Map();
 let last = "",
@@ -74,11 +75,12 @@ async function api(path, params = {}, body, signal) {
   }
   return res.json();
 }
-function modal(title, child) {
+function modal(title, child, transcriptView = false) {
   const dialog = $("detail");
   detailRequest?.abort();
   detailRequest = null;
   delete $("modalTitle").dataset.priority;
+  dialog.classList.toggle("transcript-detail", transcriptView);
   $("modalTitle").textContent = title;
   $("modalBody").replaceChildren(child);
   dialog.onkeydown = null;
@@ -93,27 +95,74 @@ function finishNoteEditing() {
   editor?.leaving();
 }
 function closeJournalDialog() {
+  closeTurnPane();
   detailRequest?.abort();
   finishNoteEditing();
   $("detail").close();
 }
+function openTurnPane(title, pane, trigger) {
+  if (expandedTurnPane) return;
+  const dialog = $("turnPaneDetail");
+  expandedTurnPane = {
+    pane, parent: pane.parentElement, trigger, top: pane.scrollTop, left: pane.scrollLeft,
+  };
+  $("turnPaneTitle").textContent = title;
+  dialog.append(pane);
+  dialog.showModal();
+  pane.focus({ preventScroll: true });
+  pane.scrollTo(0, 0);
+}
+function closeTurnPane() {
+  if (!expandedTurnPane) return;
+  const { pane, parent, trigger, top, left } = expandedTurnPane;
+  expandedTurnPane = null;
+  gPending = false;
+  $("turnPaneDetail").close();
+  parent.append(pane);
+  trigger.focus({ preventScroll: true });
+  pane.scrollTo(left, top);
+}
 async function transcript(project, r) {
-  const box = node("div");
+  const panes = node("div", undefined, "turn-detail-panes");
+  function pane(title) {
+    const section = node("section", undefined, "turn-detail-pane");
+    section.setAttribute("aria-label", title);
+    const scroll = node("div", undefined, "turn-detail-scroll");
+    scroll.tabIndex = 0;
+    scroll.setAttribute("aria-label", title);
+    scroll.addEventListener("focus", () => { gPending = false; });
+    const heading = node("div", undefined, "turn-detail-heading");
+    const expand = action("View details", () => openTurnPane(title, scroll, expand), "small");
+    heading.append(node("h2", title), expand);
+    section.append(heading, scroll);
+    panes.append(section);
+    return scroll;
+  }
+  const summary = pane("Agent summary");
+  const box = pane("Transcript");
+  summary.append(node("p", r.summary || "No summary available."));
   box.append(node("p", "Loading transcript…"));
-  modal("Transcript", box);
+  modal("Turn details", panes, true);
+  summary.focus({ preventScroll: true });
   const key = JSON.stringify([project, r.thread, r.turn, r.revision]);
   try {
-    let items = r.revision == null ? null : detailCache.get(key);
-    if (!items) {
+    let detail = r.revision == null ? null : detailCache.get(key);
+    if (!detail) {
       detailRequest = new AbortController();
-      items = await api("transcript", { project, thread: r.thread, turn: r.turn }, undefined, detailRequest.signal);
+      detail = await api("transcript", {
+        project, thread: r.thread, turn: r.turn, with_summary: "true",
+      }, undefined, detailRequest.signal);
       if (r.revision != null) {
         if (detailCache.size >= 6) detailCache.delete(detailCache.keys().next().value);
-        detailCache.set(key, items);
+        detailCache.set(key, detail);
       }
     }
     if (!box.isConnected || !$("detail").open) return;
+    const items = Array.isArray(detail) ? detail : detail.items;
+    if (detail.summary_detail) summary.replaceChildren(renderMarkdown(detail.summary_detail));
+    else if (detail.summary) summary.replaceChildren(node("p", detail.summary));
     box.replaceChildren();
+    if (!items.length) box.append(node("p", "No transcript items."));
     function renderItems(start) {
       if (!box.isConnected || !$("detail").open) return;
       for (const item of items.slice(start, start + 8)) {
@@ -460,13 +509,16 @@ function board(project, rows, notes) {
         if (!paired) entry.classList.add("note-card");
         cell.append(entry);
       }
-      cell.append(
-        action(
-          "+ Note",
-          () => editNote(project, { thread: r.thread, turn: r.turn }),
-          "small",
-        ),
+      const addNote = action(
+        "+ Note",
+        () => editNote(project, { thread: r.thread, turn: r.turn }),
+        "small",
       );
+      if (!attached.length) {
+        addNote.dataset.axis = "1";
+        addNote.dataset.identity = JSON.stringify([r.thread, r.turn]);
+      }
+      cell.append(addNote);
       if (noteCut?.project === project)
         cell.append(action("Paste note", () => pasteNote(project, r), "small"));
       card.append(cell);
@@ -548,30 +600,15 @@ async function readRoute(target, cached, signal) {
     journey(before),
     api("notes", { project }, undefined, signal),
   ]);
-  if (query.edge && !cachedEdge) {
+  if (query.edge === "first" && !cachedEdge) {
     // Older servers expose only backward cursors. Keep the pages traversed to get here.
-    const targets = new Set(notes.filter(note => note.turn).map(note => JSON.stringify([note.thread, note.turn])));
-    const latest = batch;
-    let noteEdge;
-    while (query.edge !== "last-note" || targets.size) {
-      if (query.edge.endsWith("-note") && batch.slice(-pageSize).some(row =>
-        targets.has(JSON.stringify([row.thread, row.turn])))) {
-        noteEdge = { before, newerPages: newerPages.slice(), batch };
-        if (query.edge === "last-note") break;
-      }
-      if (batch.length <= pageSize) break;
+    while (batch.length > pageSize) {
       const row = batch.at(-pageSize);
       const cursor = JSON.stringify([row.started, row.turn, row.thread]);
       if (cursor === before) throw new Error("The server did not return an older Journey page");
       newerPages.push(before);
       before = cursor;
       batch = await journey(before);
-    }
-    if (noteEdge) ({ before, newerPages, batch } = noteEdge);
-    else if (query.edge.endsWith("-note")) {
-      before = null;
-      newerPages = [];
-      batch = latest;
     }
   }
   return {
@@ -733,7 +770,7 @@ function renderView(target, data) {
     action("Earlier turns", () => paginate(0, "earlier")),
   );
   if (data.later) nav.append(action("Newer turns", () => paginate(0, "later")));
-  if (["before", "after", "edge"].some(key => target.query[key])) {
+  if (target.query.before || target.query.after || target.query.edge === "first") {
     nav.append(action("Latest turns", () => paginate(0, "last")));
   }
   if (visible.has(axes[2])) {
@@ -821,8 +858,7 @@ function paginate(axis, direction) {
         if (before) query.before = before;
       }
     } else query[prefix + (earlier ? "before" : "after")] = cursor;
-  } else if (axis === 1) query.edge = direction + "-note";
-  else if (direction === "first") query[prefix + "edge"] = "first";
+  } else if (direction === "first" || axis === 1) query[prefix + "edge"] = direction;
   pageQuery = query;
   browserJump = { key: route().key, axis, first: ["first", "later"].includes(direction) };
   if (browserJump.key === currentPage.key) {
@@ -842,25 +878,20 @@ function moveBetweenAxes(element, direction) {
   const nextAxis = direction < 0 ? candidates.at(-1) : candidates[0];
   if (nextAxis === undefined) return;
 
-  const items = axisItems(nextAxis);
   const card = element.closest(".board-card.paired");
   const pane = [...$("content").querySelectorAll("[data-pane]")].find(candidate =>
     candidate.dataset.pane.split("+").includes(axes[nextAxis]));
   activeAxis = nextAxis;
   if (card && nextAxis < 2 && pane) {
-    const cards = [...pane.children];
-    const row = cards.indexOf(card);
-    const nearest = items.reduce((best, item) => {
-      const distance = Math.abs(cards.indexOf(item.closest(".board-card")) - row);
-      return !best || distance < best.distance ? { item, distance } : best;
-    }, null);
-    if (nearest) {
-      nearest.item.focus();
+    const matching = card.querySelector(`[data-axis="${nextAxis}"]`);
+    if (matching) {
+      matching.focus();
       return;
     }
   }
   if (pane) {
     const top = pane.getBoundingClientRect().top;
+    const items = axisItems(nextAxis);
     (items.find(item => item.getBoundingClientRect().bottom > top) ?? pane).focus();
   }
 }
@@ -871,16 +902,19 @@ function browseKeys(event) {
   if (event.target.matches("input, select, textarea, [contenteditable]")) return;
   if ($("detail").open) {
     if (activeNoteEditor) return;
-    const frame = $("modalBody");
     if (["j", "k", "d", "u", "g", "G"].includes(event.key)) {
       event.preventDefault();
-      const scroll = $("detail");
+      const dialog = $("turnPaneDetail").open ? $("turnPaneDetail") : $("detail");
+      const scroll = event.target.closest(".turn-detail-scroll")
+        ?? event.target.closest(".turn-detail-pane")?.querySelector(".turn-detail-scroll")
+        ?? dialog.querySelector(".turn-detail-scroll")
+        ?? dialog;
       if (event.key === "g") {
         if (gPending) scroll.scrollTop = 0;
         gPending = !gPending;
       } else {
         gPending = false;
-        if (event.key === "G") scroll.scrollTop = frame.scrollHeight;
+        if (event.key === "G") scroll.scrollTop = scroll.scrollHeight;
         else scroll.scrollTop += ({ j: 28, k: -28, d: scroll.clientHeight / 2, u: -scroll.clientHeight / 2 })[event.key];
       }
     }
@@ -932,12 +966,18 @@ function browseKeys(event) {
 
 $("home").onclick = () => { location.hash = ""; };
 $("close").onclick = closeJournalDialog;
+$("closeTurnPane").onclick = closeTurnPane;
+$("turnPaneDetail").addEventListener("cancel", event => {
+  event.preventDefault();
+  closeTurnPane();
+});
 $("detail").addEventListener("cancel", () => {
   detailRequest?.abort();
   finishNoteEditing();
 });
 $("detail").addEventListener("close", () => {
   if ($("detail").open) return;
+  closeTurnPane();
   detailRequest?.abort();
   detailRequest = null;
   finishNoteEditing();
@@ -975,7 +1015,24 @@ window.addEventListener("pagehide", () => {
 });
 document.addEventListener("keydown", browseKeys);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-refresh();
+async function startJournal() {
+  if (location.hash.startsWith("#login?")) {
+    const params = new URLSearchParams(location.hash.slice("#login?".length));
+    const project = params.get("project");
+    history.replaceState(null, "", location.pathname + location.search +
+      (project ? "#" + encodeURIComponent(project) : ""));
+    const code = params.get("code");
+    if (code) {
+      try {
+        await api("login", {}, { code });
+      } catch {
+        // The normal refresh can use an existing session or show the sign-in form.
+      }
+    }
+  }
+  await refresh();
+}
+startJournal();
 setInterval(pumpDrafts, 250);
 setInterval(() => {
   if (!activeRequest && !document.hidden && !$("detail").open && $("login").hidden && !isStorageRoute())

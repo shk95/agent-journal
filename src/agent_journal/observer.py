@@ -6,16 +6,17 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import ExitStack, closing
 from fcntl import LOCK_UN, flock
-from itertools import chain, pairwise
+from itertools import chain, islice
 
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import unix_connect
 
 from .codex_integration import Lifecycle, collector_lock, observer_path
 from .common import OBSERVATION_REFRESH, codex_home, local_repo, repo_key, turn_start
-from .summary import evidence, worker
+from .summary import CONTEXT_COUNTS, worker
 
 
 class Codex:
@@ -83,11 +84,11 @@ def request_text(items):
     return " ".join(m for m in messages if m).strip()
 
 
-def summarize(items, status):
+def summarize(items, status, limit=160):
     for item in reversed(items):
         kind = item["type"]
         if kind == "agentMessage" and item.get("text", "").strip():
-            return short(item["text"].strip().lstrip("#* "), 160)
+            return short(item["text"].strip().lstrip("#* "), limit)
         if kind == "commandExecution" and status == "inProgress":
             return short(item.get("command") or "Running a command")
         if kind == "mcpToolCall" and status == "inProgress":
@@ -164,7 +165,7 @@ class Cache:
                         *key,
                         digest,
                         data,
-                        json.dumps(evidence(record, previous), ensure_ascii=False),
+                        json.dumps({"previous": previous}, ensure_ascii=False),
                         time.time() + (5 if record["status"] == "inProgress" else 0),
                     ),
                 )
@@ -240,6 +241,15 @@ def scan(rpc, cache):
     return active
 
 
+def preceding_turns(history):
+    upcoming = deque(islice(history, max(CONTEXT_COUNTS.values()) + 1))
+    while upcoming:
+        yield upcoming.popleft(), upcoming
+        following = next(history, None)
+        if following is not None:
+            upcoming.append(following)
+
+
 def scan_thread(rpc, cache, thread, project, since, active=None):
     thread_id = thread["id"]
     args = {
@@ -272,7 +282,7 @@ def scan_thread(rpc, cache, thread, project, since, active=None):
         for row in page
         if any(item["type"] == "userMessage" for item in row.get("items", []))
     )
-    for turn, prior in pairwise(chain(history, [None])):
+    for turn, older in preceding_turns(history):
         started = turn.get("startedAt")
         if started is None:
             continue
@@ -297,12 +307,14 @@ def scan_thread(rpc, cache, thread, project, since, active=None):
             continue
         if status == "inProgress" and active is not None:
             active.add((project, thread_id, turn["id"]))
-        previous = None
-        if prior and turn_start(prior["id"], prior.get("startedAt") or 0) >= since:
-            previous = {
-                "request": short(request_text(prior.get("items", [])), 400),
-                "answer": summarize(prior.get("items", []), prior["status"]),
+        previous = [
+            {
+                "request": short(request_text(prior.get("items", [])), 600),
+                "answer": summarize(prior.get("items", []), prior["status"], 700),
             }
+            for prior in reversed(older)
+            if turn_start(prior["id"], prior.get("startedAt") or 0) >= since
+        ]
         record = {
             "project": project,
             "thread": thread_id,

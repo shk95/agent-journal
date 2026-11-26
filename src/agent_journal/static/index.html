@@ -37,11 +37,16 @@
         <div id="content"></div>
       </section>
     </main>
-    <dialog id="detail">
+    <dialog id="detail" aria-labelledby="modalTitle">
       <header>
         <strong id="modalTitle"></strong><button id="close">Close</button>
       </header>
       <div id="modalBody"></div>
+    </dialog>
+    <dialog id="turnPaneDetail" aria-labelledby="turnPaneTitle">
+      <header>
+        <strong id="turnPaneTitle"></strong><button id="closeTurnPane">Back</button>
+      </header>
     </dialog>
   </body>
 </html>

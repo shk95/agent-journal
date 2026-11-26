@@ -14,6 +14,7 @@ from .common import (
     ConnectionRequired,
     JournalHTTPError,
     local_repo,
+    open_web,
     repo_key,
     state_dir,
 )
@@ -128,6 +129,9 @@ def main():
     tui.add_argument("--no-mouse", action="store_true", help="disable mouse input")
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
+    summary = commands.add_parser("summary", help="view or set this machine's summary level")
+    summary.add_argument("level", nargs="?", help="Low, Normal, or High")
+    summary.add_argument("--refresh", action="store_true", help="review model choices now")
     commands.add_parser("projects")
     commands.add_parser(
         "stats", help="show storage statistics for the connected Journal server"
@@ -155,6 +159,19 @@ def main():
             return
         if args.command == "connect":
             connect(args.url)
+            return
+        if args.command == "summary":
+            from .summary import load_settings, save_settings, summary_policy
+
+            root = state_dir()
+            settings = load_settings(root)
+            if args.level is not None or not (root / "summary.json").exists():
+                settings = save_settings(root, settings, args.level)
+            if args.refresh:
+                policy = summary_policy(root, settings["levels"], refresh=True)
+                for level, choice in policy["choices"].items():
+                    print(f"{level} · {choice['model']} · {choice['effort']}")
+            print(f"Summary level · {settings['level']}")
             return
         if args.command == "setup-codex":
             from .codex_integration import setup_codex
@@ -232,14 +249,7 @@ def main():
             (Api(), None) if args.command == "observe" else client_connection()
         )
         if args.command == "web":
-            import webbrowser
-            from urllib.parse import quote
-
-            url = api.base + "/"
-            if args.project:
-                url += "#" + quote(current(args.project), safe="")
-            print(url, flush=True)
-            webbrowser.open_new_tab(url)
+            open_web(api, current(args.project) if args.project else "", print_url=True)
             return
         if args.command == "server-version":
             print(api.server_version() or "unknown")
