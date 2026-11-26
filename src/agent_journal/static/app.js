@@ -138,9 +138,9 @@ async function transcript(project, r) {
     panes.append(section);
     return scroll;
   }
-  const summary = pane("Agent summary");
+  const summary = pane("Turn explanation");
   const box = pane("Transcript");
-  summary.append(node("p", r.summary || "No summary available."));
+  summary.append(node("p", r.summary || "No explanation available."));
   box.append(node("p", "Loading transcript…"));
   modal("Turn details", panes, true);
   summary.focus({ preventScroll: true });

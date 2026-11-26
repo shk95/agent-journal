@@ -18,7 +18,7 @@ Use the standalone GitHub Release installer by default, including when an agent 
 )
 ```
 
-The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.4.0` to the installer to select a specific version. Run the installer again to upgrade.
+The installer selects the matching release asset, verifies its SHA-256 checksum and version, and installs `agent-journal` in `~/.local/bin`. Add that directory to your PATH to launch the TUI by name. Set `AGENT_JOURNAL_BIN_DIR` to install somewhere else. Pass a release tag such as `v0.7.0` to the installer to select a specific version. Run the installer again to upgrade.
 
 Verify the installed client with `agent-journal --version`. If Codex is on PATH, the installer installs the user-level `journal` MCP entry and recording hooks. Complete [the first server connection](#connect-a-work-machine), then [trust the hooks once in Codex](#set-up-codex).
 
@@ -27,12 +27,12 @@ Verify the installed client with `agent-journal --version`. If Codex is on PATH,
 The client flake supports Apple Silicon macOS (`aarch64-darwin`), Linux x86-64 (`x86_64-linux`), and Linux ARM64 (`aarch64-linux`). Enable flakes on the work machine before installing.
 
 ```sh
-nix profile add 'github:shk95/agent-journal/v0.4.0#client'
+nix profile add 'github:shk95/agent-journal/v0.7.0#client'
 ```
 
-Older Nix versions use `nix profile install`. Substitute the desired release tag to pin a different version. To run the client directly, use `nix run 'github:shk95/agent-journal/v0.4.0#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
+Older Nix versions use `nix profile install`. Substitute the desired release tag to pin a different version. To run the client directly, use `nix run 'github:shk95/agent-journal/v0.7.0#client'`. From a local checkout, use `nix run .#client` or `nix flake check` to verify the package.
 
-The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and summaries use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
+The flake reads Python dependencies from `uv.lock` and includes Git and the GitHub CLI. Observation and turn explanations use the signed-in Codex CLI on your PATH. Sign in to GitHub CLI before registering a repository.
 
 ### Python package
 
@@ -53,7 +53,7 @@ export AGENT_JOURNAL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_ur
 agent-journal serve
 ```
 
-The default address is `http://127.0.0.1:8765`. For cloud use, keep the database on a persistent volume and connect through an HTTPS reverse proxy. Use `serve --database /path/to/journal.sqlite3` to set the database location. Summaries are produced on the work machines.
+The default address is `http://127.0.0.1:8765`. For cloud use, keep the database on a persistent volume and connect through an HTTPS reverse proxy. Use `serve --database /path/to/journal.sqlite3` to set the database location. The work machines generate turn explanations.
 
 ## Connect a work machine
 
@@ -79,7 +79,7 @@ agent-journal
 - Use `h/l` to move to the visible axis on the left or right, or `Tab` and `Shift+Tab` to cycle through the axes. Use `j/k` to move one item or line and `d/u` to move half a screen. Use `gg/G` for the first or last item on the current page. `Older` (`[`) and `Newer` (`]`) move one page. `Oldest` (`<`) and `Latest` (`>`) jump to the ends of the history for the focused axis.
 - Scroll over an axis with the mouse wheel or focus it before using the keyboard. Journey and Turn notes share a scrolling pane when both are visible. Each card contains the turn and its attached notes. Project notes scroll independently.
 - Press `Enter` to open a transcript or note. Parent layers remain visible at the top of the screen. `Esc` closes the top layer and restores the parent selection and scroll position. On short terminals, the path above the content identifies the active layer.
-- A Journey turn opens the agent summary above its transcript. Each box scrolls independently and has a **View details** control that opens its full content in a separate dialog. In the terminal, press `1` for the summary or `2` for the transcript. Use `Tab` to switch boxes and `Enter` to expand the selected box. In the browser, focus the box before using the scrolling keys, or scroll over it directly. Close the expanded dialog to return to the same position in the turn details.
+- A Journey turn opens the turn explanation above its transcript. Each box scrolls independently and has a **View details** control that opens its full content in a separate dialog. In the terminal, press `1` for the explanation or `2` for the transcript. Use `Tab` to switch boxes and `Enter` to expand the selected box. In the browser, focus the box before using the scrolling keys, or scroll over it directly. Close the expanded dialog to return to the same position in the turn details.
 - Turn notes includes turns without notes. Use `m` to add a note to the selected turn, `n` for a project note, and `e` to edit an existing note in place. In the editor, `i` enters Insert mode, `Esc` returns to Normal mode, `Ctrl+P` toggles the Markdown preview, and `:w` queues an immediate save.
 - In a note detail, `D` prompts for deletion. In a turn note, `x` selects it for moving. Navigate to another turn and press `p` to move it, or `X` to cancel the cut.
 - Use `Status` in a note detail in either client to choose Highlighted, Normal, or Low priority. In the TUI, press `s` to open the menu and `1`, `2`, or `3` to choose a status. Existing and new notes default to Normal. The status changes the title's appearance and preserves the note's position. Status changes require a server connection.
@@ -105,26 +105,37 @@ Run `agent-journal stats` or open **Storage** in the web journal to see the acti
 
 Project sizes count transcript JSON, stored prompts and summaries, and note text in bytes. The file sizes also include SQLite overhead and reusable pages. They exclude deployment snapshots and separate backups.
 
-## Collection and summaries
+## Collection and turn explanations
 
 The observer reads sessions and turns every three seconds by default. Clones and worktrees with the same GitHub `owner/repo` share a journal. The observer recovers subsecond start times from Codex turn IDs when available. Older records with second-only timestamps have a conservative cutoff. Turning collection back on sets a fresh cutoff.
 
-The observer sends transcripts and a preliminary summary first. A separate worker runs a read-only, ephemeral `codex exec` in a temporary directory to generate an English summary. This uses model capacity. Journey displays a brief line, and the turn detail displays the fuller explanation. Older turns and turns awaiting a detailed summary display their available brief line in the summary pane.
+The observer sends transcripts and a preliminary line first. A separate worker runs a read-only, ephemeral `codex exec` in a temporary directory to generate a Journey line and a standalone English explanation. The explanation names the task, connects relevant context to what happened, and explains the outcome. Older turns and turns awaiting an explanation display their available brief line.
 
-Run `agent-journal summary` to see the selected level and create `summary.json` in the local state directory. Choose Low, Normal, or High. The command also accepts `낮음`, `보통`, and `높음`.
+### Explanation settings
+
+The terminal header shows the current quality. Use the CLI or ask Codex to change it, for example, “Set my turn explanation quality to In-depth.”
 
 ```sh
-agent-journal summary 높음
-agent-journal summary --refresh
+agent-journal explanation
+agent-journal explanation 심층
+agent-journal explanation --help
 ```
 
-Normal is the default. Higher quality gives the worker more conversation and observations to explain what happened in context. Low, Normal, and High include up to one, three, and six preceding turns from the same session within the collection period. High asks the model to make significant decisions, constraints, and supporting evidence easy to follow.
+| Quality | What the reader gets | Preceding turns available |
+| --- | --- | --- |
+| Basic (`기본`) | The task, its purpose, and the main outcome | Up to 1 |
+| Contextual (`맥락`), default | An explanation that connects relevant earlier decisions to the work and its result | Up to 3 |
+| In-depth (`심층`) | A standalone account of the task, why it took this shape, and what the evidence confirms or leaves open | Up to 6 |
 
-Edit the level descriptions in `summary.json`. The summary worker asks Codex to choose a model and a supported reasoning effort for each quality level from its current catalog. The worker saves its choices in `summary-policy.json` and reviews them when summaries are due after a week, when descriptions change, or when the Codex executable changes. Use `--refresh` to review and show the choices immediately. A failed review keeps the previous choices and retries after an hour. Until a review succeeds, the worker uses the Codex default. An existing `AGENT_JOURNAL_SUMMARY_MODEL` override sets the model while the selected level still controls the summary's context and instructions.
+Agent Journal stores these settings in `~/.agent-journal/settings.json`. Set `AGENT_JOURNAL_HOME` to use another directory. Set `explanation_quality` to a level above or edit `explanation_levels` to add preferences. The worker uses the level to select context from the same session and periodically reviews model choices. Run `agent-journal explanation --refresh` to review the choices immediately.
+
+Token measurement is on by default. Run `agent-journal explanation-usage --days 30` to see tokens spent generating explanations and reviewing model choices on this machine. Set `measure_explanation_usage` to `false` in the settings file or run `agent-journal explanation --measure-usage off` to stop recording future usage.
+
+### Collection lifecycle
 
 During a server outage, the observer uses its cached list of registered projects and holds the latest unacknowledged snapshots in SQLite. It clears pending payloads after successful delivery. The clients show when the observer loses contact with a previously running turn or recording stops for the project. The local state directory defaults to `~/.agent-journal` and can be set with `AGENT_JOURNAL_HOME`.
 
-Collection uses the shared Codex App Server. Session hooks start one collector for concurrent Codex sessions and let it finish pending work after the last session ends. From the next session it resumes any work saved to the local queue. For troubleshooting or a custom App Server socket, use `agent-journal observe --socket PATH` to run the collector in the foreground. Automatic collector diagnostics go to `observer.log` in the local state directory. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
+Collection uses the shared Codex App Server. Trusted hooks start one collector when a session opens or resumes. While running, it also reads already-open sessions visible to that App Server. Eligible turns start at or after project registration. The collector finishes pending work after the last tracked session ends and resumes its local queue the next time it starts. For troubleshooting or a custom App Server socket, use `agent-journal observe --socket PATH` to run it in the foreground. Diagnostics go to `observer.log` in the local state directory. The [release plan](../RELEASE_PLAN.md) tracks selective import of older sessions.
 
 ## Set up Codex
 
@@ -184,7 +195,7 @@ Ask Codex to register an accessible GitHub repository using `journal_dev`. Start
 uv run --locked python scripts/dev.py client observe
 ```
 
-Run Codex from that repository as usual. In another pane, open the journal with `uv run --locked python scripts/dev.py client tui --project OWNER/REPO`. The observer uses the local Codex App Server and the signed-in CLI for real summaries.
+Run Codex from that repository as usual. In another pane, open the journal with `uv run --locked python scripts/dev.py client tui --project OWNER/REPO`. The observer uses the local Codex App Server and the signed-in CLI to generate turn explanations.
 
 ### Automated checks
 
@@ -201,7 +212,7 @@ uv build
 
 ### Local Codex and client smoke test
 
-Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server and a separate real Codex App Server, verifies that the installed hooks require trust, and trusts them in the temporary Codex configuration. Codex starts and stops the collector as sessions open and close, and registers the checkout through MCP using a synthetic GitHub CLI response. The test checks a running turn and its final summary, a Codex MCP note on the previous turn, and synchronization of notes between the TUI and browser. It opens the TUI from a nested Git directory and exercises keyboard and mouse input. A loopback model fixture supplies responses to both Codex processes.
+Run the entire interactive path on one development machine with Git, tmux, and Codex CLI 0.172.0 or a compatible version. The test starts a fresh journal server and a separate real Codex App Server, verifies hook trust, and registers the checkout through MCP using a synthetic GitHub CLI response. It checks collection, turn explanations and token counts, local quality changes in the TUI, browser sign-in, expandable turn details, and synchronization of notes. A loopback model fixture supplies responses to both Codex processes.
 
 ```sh
 uv run --locked --with playwright==1.65.2 python -m playwright install chromium

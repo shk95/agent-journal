@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
+from textwrap import fill
 
 from .common import (
     Api,
@@ -18,6 +19,7 @@ from .common import (
     repo_key,
     state_dir,
 )
+from .settings import DEFAULT_EXPLANATION_QUALITY, EXPLANATION_LEVELS
 
 
 def current(explicit):
@@ -105,6 +107,27 @@ def show_stats(api):
         )
 
 
+def show_explanation_usage(root, days):
+    from .explanation_usage import explanation_usage
+
+    rows = explanation_usage(root, days)
+    if not rows:
+        print(f"No explanation calls recorded in the last {days} days.")
+        return
+    total = sum(row["input_tokens"] + row["output_tokens"] for row in rows)
+    measured = sum(row["measured_calls"] for row in rows)
+    calls = sum(row["calls"] for row in rows)
+    print(f"Turn explanation usage · last {days} days")
+    print(f"{total:,} reported tokens across {measured:,} of {calls:,} calls")
+    for row in rows:
+        label = "Model calibration" if row["purpose"] == "calibration" else f"Explanation · {row['quality']}"
+        print(
+            f"{label} · {row['model']} · {row['measured_calls']:,}/{row['calls']:,} measured"
+            f" · {row['input_tokens']:,} input ({row['cached_input_tokens']:,} cached)"
+            f" · {row['output_tokens']:,} output"
+        )
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="agent-journal",
@@ -129,9 +152,26 @@ def main():
     tui.add_argument("--no-mouse", action="store_true", help="disable mouse input")
     web = commands.add_parser("web", help="open the web journal in a browser")
     web.add_argument("--project", metavar="OWNER/REPO")
-    summary = commands.add_parser("summary", help="view or set this machine's summary level")
-    summary.add_argument("level", nargs="?", help="Low, Normal, or High")
-    summary.add_argument("--refresh", action="store_true", help="review model choices now")
+    quality_help = ["Quality levels"]
+    for name, description in EXPLANATION_LEVELS.items():
+        label = f"{name} (default)" if name == DEFAULT_EXPLANATION_QUALITY else name
+        quality_help.append(fill(f"{label}  {description}", width=78, initial_indent="  ",
+                                 subsequent_indent="    "))
+    quality_help.extend((
+        "", "The command also accepts 기본, 맥락, and 심층.",
+        "Settings are saved in ~/.agent-journal/settings.json by default.",
+        "Set AGENT_JOURNAL_HOME to use another directory.",
+    ))
+    explanation = commands.add_parser(
+        "explanation", aliases=["summary"], help="view or set this machine's explanation quality",
+        description="Show the current explanation settings, or supply a quality level to change it.",
+        epilog="\n".join(quality_help), formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    explanation.add_argument("quality", nargs="?", metavar="QUALITY", help="set the quality level")
+    explanation.add_argument("--refresh", action="store_true", help="review model choices now")
+    explanation.add_argument("--measure-usage", choices=("on", "off"), help="record local explanation token counts")
+    usage = commands.add_parser("explanation-usage", help="view local explanation token counts")
+    usage.add_argument("--days", type=int, default=30)
     commands.add_parser("projects")
     commands.add_parser(
         "stats", help="show storage statistics for the connected Journal server"
@@ -160,18 +200,25 @@ def main():
         if args.command == "connect":
             connect(args.url)
             return
-        if args.command == "summary":
-            from .summary import load_settings, save_settings, summary_policy
+        if args.command in ("explanation", "summary"):
+            from .settings import update_settings
+            from .summary import summary_policy
 
             root = state_dir()
-            settings = load_settings(root)
-            if args.level is not None or not (root / "summary.json").exists():
-                settings = save_settings(root, settings, args.level)
+            measure = args.measure_usage == "on" if args.measure_usage is not None else None
+            settings = update_settings(root, quality=args.quality, measure_usage=measure)
             if args.refresh:
-                policy = summary_policy(root, settings["levels"], refresh=True)
+                policy = summary_policy(
+                    root, settings["explanation_levels"], refresh=True,
+                    measure_usage=settings["measure_explanation_usage"],
+                )
                 for level, choice in policy["choices"].items():
                     print(f"{level} · {choice['model']} · {choice['effort']}")
-            print(f"Summary level · {settings['level']}")
+            print(f"Explanation quality · {settings['explanation_quality']}")
+            print("Usage measurement · " + ("on" if settings["measure_explanation_usage"] else "off"))
+            return
+        if args.command == "explanation-usage":
+            show_explanation_usage(state_dir(), args.days)
             return
         if args.command == "setup-codex":
             from .codex_integration import setup_codex

@@ -25,6 +25,7 @@ from agent_journal.common import OBSERVATION_LEASE, Api, JournalHTTPError, repo_
 from agent_journal.mcp_server import make_mcp
 from agent_journal.observer import Cache, scan
 from agent_journal.server import SCHEMA, connect, endpoint, make_server
+from agent_journal.settings import load_settings
 from agent_journal.summary import work_once
 
 
@@ -771,6 +772,22 @@ class TestJournal(unittest.TestCase):
                 self.assertNotIn("journey", value)
                 self.assertEqual(value["project_notes"], [])
                 self.assertEqual([n["turn"] for n in value["turn_notes"]], ["one"])
+
+        asyncio.run(check())
+
+    def test_mcp_can_read_and_set_the_local_explanation_quality(self):
+        async def check():
+            async with Client(make_mcp(), raise_exceptions=True) as client:
+                initial = await client.call_tool("explanation_settings", {})
+                self.assertEqual(initial.structured_content, {
+                    "explanation_quality": "Contextual", "measure_explanation_usage": True,
+                })
+                self.assertFalse((self.path / "settings.json").exists())
+                updated = await client.call_tool("set_explanation_quality", {"quality": "심층"})
+                self.assertEqual(updated.structured_content, {"explanation_quality": "In-depth"})
+                self.assertEqual(load_settings(self.path)["explanation_quality"], "In-depth")
+                usage = await client.call_tool("explanation_usage", {"days": 7})
+                self.assertEqual(usage.structured_content, {"days": 7, "usage": []})
 
         asyncio.run(check())
 

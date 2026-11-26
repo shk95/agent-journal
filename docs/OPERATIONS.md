@@ -48,7 +48,7 @@ Confirmed migration, startup, or readiness failures are recorded against the exa
 
 ```sh
 sudo python3 /opt/agent-journal/server_deploy.py status
-sudo python3 /opt/agent-journal/server_deploy.py retry v0.5.0-0123456789ab
+sudo python3 /opt/agent-journal/server_deploy.py retry v0.7.0-0123456789ab
 sudo python3 /opt/agent-journal/server_deploy.py recover
 sudo python3 /opt/agent-journal/server_deploy.py cleanup
 ```
@@ -70,13 +70,14 @@ Keep existing endpoint paths, required fields, and response semantics stable wit
 On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Run the [local checks](SETUP.md#local-development) and `just compatibility`. The compatibility check exercises both client/server directions against the stable tags in the same major. Push a tag that matches the candidate version.
 
 ```sh
-git tag v0.4.0
-git push origin v0.4.0
+git push origin master
+git tag -a v0.7.0 -m "Agent Journal 0.7.0"
+git push origin v0.7.0
 ```
 
 The release workflow checks the public history, mixed client/server versions, Nix outputs, and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
-Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.4.0#client' -- tui` runs that release's client.
+Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.7.0#client' -- tui` runs that release's client.
 
 Declare the tested database source ranges under `[[tool.agent-journal.upgrade-from]]` in `pyproject.toml`. Each entry contains inclusive `minimum` and `maximum` stable tags. The release workflow publishes them as `upgrade_from` in the verified server manifest. Use `uv run --locked python -m tests.compatibility --database-migrations` to test same-major snapshots locally. Keep the ranges limited to tested migrations, including when releasing across a major version.
 
@@ -128,7 +129,9 @@ journal.example.com {
 }
 ```
 
-Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then open Codex in that repository on both machines. Verify that `agent-journal projects` lists the same registration on both machines and that the browser accepts the token over HTTPS.
+Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then open Codex in that repository on both machines. Verify that `agent-journal projects` lists the same registration on both machines and that `agent-journal web` opens the authenticated journal over HTTPS.
+
+Explanation quality and token usage are local to each work machine. Check them with `agent-journal explanation` and `agent-journal explanation-usage`. To preserve them, back up `settings.json` and `explanation-usage.sqlite3` from the local state directory. [Explanation settings](SETUP.md#explanation-settings)
 
 ## Observers
 

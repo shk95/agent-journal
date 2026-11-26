@@ -9,8 +9,10 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from .common import Api, local_repo, repo_key, turn_start
+from .common import Api, local_repo, repo_key, state_dir, turn_start
+from .explanation_usage import explanation_usage as local_explanation_usage
 from .observer import Codex, request_text
+from .settings import load_settings, update_settings
 
 Axis = Literal["journey", "turn_notes", "project_notes"]
 INSTRUCTIONS = """Use this journal when the user asks about it. Set up the server
@@ -27,6 +29,7 @@ Write a note only when the user explicitly asks. When they refer to the previous
 call read_journal with the exact current user request and same_session=true. Use the
 returned thread and turn IDs to attach the note. If resolution fails, identify the
 target explicitly before writing. Use a stable request_id when retrying a note write.
+Set the local explanation quality only when the user explicitly asks to change it.
 """
 
 
@@ -224,6 +227,32 @@ def make_mcp(api=None, default_project=None, socket=None):
                     for note in notes
                 ]
         return result
+
+    @server.tool(annotations=read_only, structured_output=True)
+    def explanation_settings() -> dict[str, Any]:
+        """Read this machine's Turn Explanation quality and usage measurement setting."""
+        settings = load_settings(state_dir())
+        return {
+            key: settings[key] for key in ("explanation_quality", "measure_explanation_usage")
+        }
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False,
+        ),
+        structured_output=True,
+    )
+    def set_explanation_quality(quality: str) -> dict[str, Any]:
+        """Change Turn Explanation quality on this machine when the user explicitly requests it.
+        Accepts Basic, Contextual, In-depth, 기본, 맥락, or 심층.
+        """
+        settings = update_settings(state_dir(), quality=quality)
+        return {"explanation_quality": settings["explanation_quality"]}
+
+    @server.tool(annotations=read_only, structured_output=True)
+    def explanation_usage(days: int = 30) -> dict[str, Any]:
+        """Read locally reported tokens spent generating turn explanations and calibrating model choices."""
+        return {"days": days, "usage": local_explanation_usage(state_dir(), days)}
 
     @server.tool(
         annotations=ToolAnnotations(

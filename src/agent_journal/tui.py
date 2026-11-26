@@ -13,8 +13,9 @@ from dataclasses import dataclass, field, replace
 from itertools import islice
 
 from .client_state import ClientState, background
-from .common import open_web
+from .common import open_web, state_dir
 from .graph import layout
+from .settings import DEFAULT_EXPLANATION_QUALITY, load_settings
 from .text_layout import cell_width, fit, markdown_preview, note_title, wrap
 from .tui_editor import Editor, Keys, Paste, editor_line, line_start
 
@@ -588,7 +589,7 @@ def transcript_text(api, project, turn):
         sections.append(f"[{item['type']}]\n{text}")
     summary = detail.get("summary_detail")
     return (
-        markdown_preview(summary) if summary else (detail.get("summary") or turn.get("summary") or "No summary available."),
+        markdown_preview(summary) if summary else (detail.get("summary") or turn.get("summary") or "No explanation available."),
         "\n".join(sections) or "No transcript items.",
     )
 
@@ -721,7 +722,7 @@ def draw_item(window, view, item, status, *, expanded=False):
         split = start + max(minimum, min(height - minimum, height * 2 // 5))
         item.pane_rows = start, split
         for y, end, label, pane, key in (
-            (start, split, "Agent summary", item.summary, "1"),
+            (start, split, "Turn explanation", item.summary, "1"),
             (split, h - 1, "Transcript", item, "2"),
         ):
             focused = (pane is item.summary) == item.summary_focused
@@ -785,6 +786,9 @@ class Terminal:
         self.item = self.board_job = self.detail_job = self.preview_job = self.mutation = None
         self.detail_request = None
         self.web_job = None
+        self.settings_root = state_dir()
+        self.explanation_quality = DEFAULT_EXPLANATION_QUALITY
+        self.settings_refresh = 0
         self.cut = None
         self.pages = OrderedDict()
         self.details = OrderedDict()
@@ -830,6 +834,15 @@ class Terminal:
         if redraw:
             self.saved_revision = self.state.revision
             self.invalidate_board()
+        if when >= self.settings_refresh:
+            self.settings_refresh = when + 1
+            try:
+                quality = load_settings(self.settings_root)["explanation_quality"]
+            except (OSError, ValueError):
+                quality = DEFAULT_EXPLANATION_QUALITY
+            if quality != self.explanation_quality:
+                self.explanation_quality = quality
+                redraw = True
         if self.web_job is not None and self.web_job.done():
             try:
                 self.message = "Web journal opened" if self.web_job.result() else "Could not open a browser"
@@ -996,11 +1009,19 @@ class Terminal:
         )
         return data, turns, graph, turn_notes, project_notes
 
+    def draw_header(self, win, width):
+        label = f"Explanation quality · {self.explanation_quality}"
+        if width - cell_width(label) < 12:
+            label = self.explanation_quality
+        position = width - cell_width(label) - 1
+        write(win, 0, 0, self.project, position - 2, curses.A_BOLD)
+        write(win, 0, position, label, cell_width(label), curses.A_DIM)
+
     def draw(self):
         win = self.window
         h, w = win.getmaxyx()
         win.erase()
-        write(win, 0, 0, self.project, w - 1, curses.A_BOLD)
+        self.draw_header(win, w)
         self.cursor = None
         self.board_hit = self.item_hit = None
         if h < 9 or w < 25:
@@ -1017,7 +1038,7 @@ class Terminal:
         for level, board in enumerate([self.root] if self.view is self.root else [self.root, self.view]):
             window = panel(win, level) if level else win
             if window is win:
-                write(win, 0, 0, self.project, w - 1, curses.A_BOLD)
+                self.draw_header(win, w)
             page, turns, graph, turn_notes, project_notes = self.data(board)
             maps = draw_board(
                 window, board, bool(level), turns, graph, turn_notes, project_notes,
@@ -1054,7 +1075,7 @@ class Terminal:
         title = "Turn details · " + row["prompt"]
         key = (*turn_key(row), row.get("revision"))
         cached = self.details.get(key) if row.get("revision") is not None else None
-        summary, transcript = cached or (row.get("summary") or "No summary available.", "Loading transcript…")
+        summary, transcript = cached or (row.get("summary") or "No explanation available.", "Loading transcript…")
         self.item = Item(
             title, content=transcript, loading=cached is None, summary=TextPane(content=summary)
         )
@@ -1206,7 +1227,7 @@ class Terminal:
         if item.summary is not None and key in ("1", "2", "\n", "\r"):
             if key in ("1", "2"):
                 item.summary_focused = key == "1"
-            title = "Agent summary" if item.summary_focused else "Transcript"
+            title = "Turn explanation" if item.summary_focused else "Transcript"
             item.expanded = Item(title)
             self.prefix = ""
             return

@@ -22,8 +22,9 @@ from urllib.parse import quote, urlencode
 
 from agent_journal.codex_integration import collector_lock
 from agent_journal.common import Api
+from agent_journal.explanation_usage import explanation_usage
 from agent_journal.observer import Codex
-from agent_journal.summary import LEVELS
+from agent_journal.settings import EXPLANATION_LEVELS
 from scripts.dev import FIXTURE, seed
 from tests.processes import (
     child, cleanup_on_termination, observer_groups, startup_line, stop_group, stop_tmux,
@@ -46,7 +47,7 @@ MOUSE_EDIT = "Save the input with its example."
 SUMMARY_MODEL = "gpt-5.4"
 SUMMARY_CHOICES = {
     level: {"model": SUMMARY_MODEL, "effort": effort}
-    for level, effort in zip(LEVELS, ("low", "medium", "high"))
+    for level, effort in zip(EXPLANATION_LEVELS, ("low", "medium", "high"))
 }
 
 
@@ -115,7 +116,14 @@ class FixtureModel(BaseHTTPRequestHandler):
         self.event("response.output_item.done", output_index=0, item=item)
         self.event(
             "response.completed",
-            response=response | {"status": "completed", "output": [item]},
+            response=response | {
+                "status": "completed", "output": [item],
+                "usage": {
+                    "input_tokens": 120, "input_tokens_details": {"cached_tokens": 30},
+                    "output_tokens": 25, "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 145,
+                },
+            },
         )
 
     def do_POST(self):
@@ -128,7 +136,7 @@ class FixtureModel(BaseHTTPRequestHandler):
             if item.get("type") == "function_call_output"
         }
         name = call_id = None
-        if "Review the Agent Journal summary levels" in serialized:
+        if "Review the Agent Journal turn explanation levels" in serialized:
             answer = json.dumps(SUMMARY_CHOICES)
         elif "observations for the journal" in serialized:
             self.server.summary_efforts.append((data.get("reasoning") or {}).get("effort"))
@@ -326,8 +334,14 @@ def check_clients(path, repo, cli, env, api, channel):
         assert "[Older]" not in screen() and "[Newer]" not in screen()
         send("[")
         wait_for("feedback at the oldest page", lambda: "No older turns" in screen())
-        if screen().splitlines()[0] != PROJECT:
+        header = screen().splitlines()[0]
+        if not header.startswith(PROJECT):
             raise RuntimeError("The default TUI did not select the checkout's project")
+        assert "Explanation quality · In-depth" in header
+        subprocess.run([cli, "explanation", "기본"], env=env, check=True, stdout=subprocess.DEVNULL)
+        wait_for("the changed quality in the open TUI", lambda:
+                 "Explanation quality · Basic" in screen().splitlines()[0])
+        subprocess.run([cli, "explanation", "심층"], env=env, check=True, stdout=subprocess.DEVNULL)
         turn_row = next(i for i, row in enumerate(screen().splitlines()) if TASK in row)
         lines = screen().splitlines()
         label = "● " + api.request("journey", project=PROJECT)[0]["thread"][-6:]
@@ -381,7 +395,7 @@ def check_clients(path, repo, cli, env, api, channel):
         summary_row = next(i for i, row in enumerate(detail_rows) if "[View details] 1" in row)
         transcript_row = next(i for i, row in enumerate(detail_rows) if "[View details] 2" in row)
         assert summary_row < transcript_row
-        assert "Agent summary" in detail_rows[summary_row] and "┌" in detail_rows[summary_row]
+        assert "Turn explanation" in detail_rows[summary_row] and "┌" in detail_rows[summary_row]
         assert "Transcript" in detail_rows[transcript_row] and "┌" in detail_rows[transcript_row]
         send("G")
         wait_for("the bottom of the summary", lambda: "Fixture observation 17." in screen())
@@ -585,7 +599,7 @@ def check_clients(path, repo, cli, env, api, channel):
                 page.wait_for_function("window.fixtureTranscriptAborted === true")
                 page.locator(".rowbtn").filter(has_text=TASK).first.click()
                 dialog = page.get_by_role("dialog")
-                summary = dialog.get_by_role("region", name="Agent summary")
+                summary = dialog.get_by_role("region", name="Turn explanation")
                 transcript = dialog.get_by_role("region", name="Transcript", exact=True)
                 summary.get_by_text(SUMMARY_DETAIL, exact=True).wait_for()
                 transcript.get_by_text(ANSWER, exact=True).wait_for()
@@ -599,7 +613,7 @@ def check_clients(path, repo, cli, env, api, channel):
                 assert transcript_scroll.evaluate("(pane) => pane.scrollTop") == 0
                 summary_button = summary.get_by_role("button", name="View details")
                 summary_button.click()
-                expanded = page.get_by_role("dialog", name="Agent summary", exact=True)
+                expanded = page.get_by_role("dialog", name="Turn explanation", exact=True)
                 expanded.get_by_text(SUMMARY_DETAIL, exact=True).wait_for()
                 assert page.locator("#detail").evaluate("(dialog) => dialog.open")
                 page.keyboard.press("Escape")
@@ -610,7 +624,7 @@ def check_clients(path, repo, cli, env, api, channel):
                 expanded = page.get_by_role("dialog", name="Transcript", exact=True)
                 expanded.get_by_text(ANSWER, exact=True).wait_for()
                 expanded.get_by_role("button", name="Back", exact=True).click()
-                dialog.get_by_role("region", name="Agent summary").wait_for()
+                dialog.get_by_role("region", name="Turn explanation").wait_for()
                 page.get_by_role("button", name="Close", exact=True).click()
                 page.get_by_label("Journey", exact=True).uncheck()
                 page.locator(".rowbtn").first.wait_for(state="detached")
@@ -800,7 +814,6 @@ def smoke(path, binary, channel, cli):
     settings = {
         "AGENT_JOURNAL_HOME": str(path / "journal"),
         "AGENT_JOURNAL_TOKEN": secrets.token_urlsafe(24),
-        "AGENT_JOURNAL_SUMMARY_MODEL": "",
     }
     environment = {
         key: value
@@ -880,7 +893,7 @@ def smoke(path, binary, channel, cli):
                 + "exec " + shlex.join([binary, *config]) + ' "$@"\n'
             )
             wrapper.chmod(0o700)
-            subprocess.run([cli, "summary", "높음"], env=environment, check=True)
+            subprocess.run([cli, "explanation", "심층"], env=environment, check=True)
             codex_env = environment | {
                 "PATH": os.pathsep.join((str(path), str(fixture_bin), environment["PATH"])),
                 "AGENT_JOURNAL_URL": "",
@@ -1006,6 +1019,14 @@ def smoke(path, binary, channel, cli):
                         lambda: recorded(turn, status="completed", summary=SUMMARY),
                     )
                     assert "high" in provider.summary_efforts
+                    metered = explanation_usage(Path(settings["AGENT_JOURNAL_HOME"]))
+                    assert any(row["purpose"] == "calibration" and row["measured_calls"] for row in metered)
+                    assert any(
+                        row["purpose"] == "generation" and row["quality"] == "In-depth"
+                        and row["input_tokens"] >= 120 and row["cached_input_tokens"] >= 30
+                        and row["output_tokens"] >= 25
+                        for row in metered
+                    )
                     marker_dir = Path(settings["AGENT_JOURNAL_HOME"]) / "codex-sessions"
                     wait_for(
                         "three Codex session markers",
