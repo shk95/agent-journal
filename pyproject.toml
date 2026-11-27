@@ -1,11 +1,12 @@
 [project]
 name = "agent-journal"
-version = "0.7.0"
+version = "0.8.0"
 description = "A personal journal for Codex sessions across GitHub projects"
 requires-python = ">=3.11"
 dependencies = [
     "markdown-it-py>=3,<5",
     "mcp>=2,<3",
+    "tzdata>=2026.6",
     "wcwidth>=0.9,<1",
     "websockets>=15,<17",
 ]
@@ -24,4 +25,4 @@ bundle = [
 
 [[tool.agent-journal.upgrade-from]]
 minimum = "v0.1.0"
-maximum = "v0.6.0"
+maximum = "v0.7.0"

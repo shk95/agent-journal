@@ -352,6 +352,9 @@ def smoke():
             )
         api("/api/register", {"project": "example/fixture"})
         add_note("before-update")
+        space = "~/" + "a" * 32
+        api("/api/note-spaces", {"project": space, "kind": "group", "name": "Fixture group"})
+        api("/api/notes", {"project": space, "id": "group-note", "body": "Fixture group note"})
         store = (deployment.slot(old) / "package").resolve()
 
         def candidate(identifier, tag, commit):
@@ -389,6 +392,9 @@ def smoke():
             "before-update",
             "after-update",
         ]
+        board = api(f"/api/board?project={space}")
+        assert board["space"]["name"] == "Fixture group"
+        assert [note["id"] for note in board["project_notes"]] == ["group-note"]
         assert not deployment.maintenance.exists()
         assert deployment.failures()[BAD]["blocked"]
     print("Initial systemd startup, update, write gate, and rollback passed.")

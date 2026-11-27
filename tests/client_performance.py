@@ -144,7 +144,7 @@ def check_terminal(path, base, requests, set_offline, api):
         subprocess.run(target + ["Escape", ":", "w", "q", "Enter"], check=True)
         wait_for(
             "the offline note window to close",
-            lambda: "[Close]" not in capture(),
+            lambda: "Markdown · # Title" not in capture(),
             timeout=5,
         )
         subprocess.run(target + ["q"], check=True)
@@ -241,6 +241,32 @@ def check_terminal(path, base, requests, set_offline, api):
             timeout=8,
         )
         print("TUI moved a note across pages and confirmed its deletion.", flush=True)
+        wait_for("the note detail to close", lambda: "[Delete]" not in capture(), timeout=8)
+        subprocess.run(target + ["Escape", "1", ">", "g", "g"], check=True)
+        def selected(turn):
+            return any(
+                ">" in line[:8] and f"fixture {turn}" in line for line in capture().splitlines()
+            )
+
+        wait_for("the first turn on the latest Journey page", lambda: selected("060"), timeout=8)
+        subprocess.run(target + ["S-Up"], check=True)
+        wait_for("the previous session turn across pages", lambda: selected("059"), timeout=8)
+        subprocess.run(target + ["S-Down"], check=True)
+        wait_for("the next session turn across pages", lambda: selected("060"), timeout=8)
+        subprocess.run(target + ["Escape", "2", ">"], check=True)
+
+        def selected_note(turn):
+            lines = capture().splitlines()
+            return any("›" in a and f"fixture {turn}" in b for a, b in zip(lines, lines[1:]))
+
+        wait_for("the latest Turn notes page", lambda: selected_note("119"), timeout=8)
+        subprocess.run(target + ["g", "g"], check=True)
+        wait_for("the first turn note on the page", lambda: selected_note("060"), timeout=8)
+        subprocess.run(target + ["K"], check=True)
+        wait_for("the previous session turn note across pages", lambda: selected_note("059"), timeout=8)
+        subprocess.run(target + ["J"], check=True)
+        wait_for("the next session turn note across pages", lambda: selected_note("060"), timeout=8)
+        print("TUI session shortcuts crossed pages in Journey and Turn notes.", flush=True)
     finally:
         stop_tmux(tmux, "performance")
 
@@ -262,14 +288,21 @@ def check_browser(base, channel, api):
             note_title = "한글 초안"
             contents = f"{note_title}\n===\n\n```text\n    indented 👩‍💻\n```\n"
             page.context.set_offline(True)
-            page.get_by_role("button", name="＋", exact=True).click()
+            dark_theme = page.get_by_role("button", name="Dark theme", exact=True)
+            dark_theme.click()
+            page.get_by_role("button", name="Add project note", exact=True).click()
             page.get_by_label("Note text").fill(contents)
             page.get_by_role("button", name="Preview", exact=True).click()
             assert (
                 page.locator(".note-preview code").inner_text() == "    indented 👩‍💻"
             )
-            page.get_by_role("button", name="Close", exact=True).click()
+            page.get_by_label("Note text").focus()
+            page.keyboard.press("Control+;")
+            page.keyboard.type(":q")
+            page.keyboard.press("Enter")
             page.reload()
+            assert dark_theme.get_attribute("aria-pressed") == "true"
+            assert page.locator("html").get_attribute("data-theme") == "dark"
             page.get_by_role("button", name="한글 초안", exact=True).click()
             assert page.get_by_label("Note text").input_value() == contents
             page.context.set_offline(False)
@@ -283,11 +316,15 @@ def check_browser(base, channel, api):
                 "Browser reloaded an offline Unicode draft and synced it after reconnecting.",
                 flush=True,
             )
-            page.get_by_role("button", name="Close", exact=True).click()
+            page.keyboard.press("Control+;")
+            page.keyboard.type(":q")
+            page.keyboard.press("Enter")
             page.get_by_role("button", name="+ Note", exact=True).first.click()
             page.get_by_label("Note text").fill("# Movable fixture\n\nTrack across turns")
             page.get_by_text("Insert · Saved", exact=True).wait_for(timeout=6000)
-            page.get_by_role("button", name="Close", exact=True).click()
+            page.keyboard.press("Control+;")
+            page.keyboard.type(":q")
+            page.keyboard.press("Enter")
             page.get_by_role("button", name="Movable fixture", exact=True).click()
             page.get_by_role("button", name="Cut", exact=True).click()
             page.get_by_role("button", name="Paste note", exact=True).last.click()

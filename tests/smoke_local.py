@@ -328,6 +328,7 @@ def check_clients(path, repo, cli, env, api, channel):
         subprocess.run(tmux + ["paste-buffer", "-p", "-t", "journal"], check=True)
 
     try:
+        subprocess.run([cli, "timezone", "Asia/Seoul"], env=env, check=True, capture_output=True)
         launch()
         wait_for("the TUI journey for the current checkout", lambda: TASK in screen())
         assert "[Transcript] t" in screen() and "[+ Turn note] m" in screen()
@@ -338,6 +339,7 @@ def check_clients(path, repo, cli, env, api, channel):
         if not header.startswith(PROJECT):
             raise RuntimeError("The default TUI did not select the checkout's project")
         assert "Explanation quality · In-depth" in header
+        assert "Time zone · Asia/Seoul" in header
         subprocess.run([cli, "explanation", "기본"], env=env, check=True, stdout=subprocess.DEVNULL)
         wait_for("the changed quality in the open TUI", lambda:
                  "Explanation quality · Basic" in screen().splitlines()[0])
@@ -380,7 +382,7 @@ def check_clients(path, repo, cli, env, api, channel):
                  any(NOTE_TASK in line and "› No turn notes" in line for line in screen().splitlines()))
         send("m")
         wait_for("the empty turn's note editor", lambda: "Insert ·" in screen())
-        send("Escape", "Escape", "k")
+        send("Escape", ":", "q", "Enter", "k")
         wait_for("the note selected again", lambda:
                  re.search(r"› (?:\[\d+/\d+\] )?" + re.escape(NOTE), screen()))
         send("l", "Enter")
@@ -391,6 +393,7 @@ def check_clients(path, repo, cli, env, api, channel):
         click_label("[Transcript]")
         wait_for("the clicked turn's transcript and its parent", lambda:
                  ANSWER in screen() and action_bar("[Close] Esc") and "Axes ·" in screen())
+        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST", screen())
         detail_rows = screen().splitlines()
         summary_row = next(i for i, row in enumerate(detail_rows) if "[View details] 1" in row)
         transcript_row = next(i for i, row in enumerate(detail_rows) if "[View details] 2" in row)
@@ -431,7 +434,12 @@ def check_clients(path, repo, cli, env, api, channel):
                  axis("1 Journey + 2 Turn notes") and selected(TASK) and "[Close]" not in screen())
         click_label("[+ Turn note]")
         wait_for("the in-place turn note editor", lambda:
-                 "Insert ·" in screen() and action_bar("[Close] Esc", "[Save] :w", "[Preview] ^P"))
+                 "Insert ·" in screen() and action_bar("[Save] :w", "[Preview] ^P"))
+        send("Escape", "C-v")
+        wait_for("Visual block mode in the terminal editor", lambda: "Visual block ·" in screen())
+        send("Escape", ":", "h", "e", "l", "p", "Enter")
+        wait_for("the terminal editor help", lambda: "Editor keys" in screen())
+        send("Escape", "i")
         title = "한글 노트"
         paragraph = "Next paragraph."
         markdown = f"# {title}\n\n{MOUSE_NOTE}\n    Indented line\\\nHard break.\n\n{paragraph}"
@@ -450,14 +458,16 @@ def check_clients(path, repo, cli, env, api, channel):
         paste(markdown)
         send("C-p")
         wait_for("line and paragraph breaks in the TUI note preview", lambda: shows_note_lines(preview=True))
-        send("Escape", ":", "w", "q", "Enter")
+        send("Escape", "Escape")
+        wait_for("Escape to leave the editor open", lambda: "Normal ·" in screen() and ":q close" in screen())
+        send(":", "w", "q", "Enter")
         first_turn = api.request("journey", project=PROJECT)[0]["turn"]
         wait_for("the saved title and indented contents", lambda: any(
             note["turn"] == first_turn and note["title"] == title
             and note["body"] == markdown
             for note in api.request("notes", project=PROJECT)
         ))
-        wait_for("the editor to close", lambda: "[Close]" not in screen())
+        wait_for("the editor to close", lambda: "Markdown · # Title" not in screen())
         wait_for("the Korean note in the board", lambda: title in screen())
         click_label(title)
         wait_for("line and paragraph breaks in the TUI note detail", shows_note_lines)
@@ -482,8 +492,8 @@ def check_clients(path, repo, cli, env, api, channel):
             note["title"] == "Untitled note" and note["body"] == PROJECT_NOTE and note["turn"] is None
             for note in api.request("notes", project=PROJECT)
         ))
-        send("Escape", "Escape")
-        wait_for("the project axis after editing", lambda: axis("3 Project notes") and "[Close]" not in screen())
+        send("Escape", ":", "q", "Enter")
+        wait_for("the project axis after editing", lambda: axis("3 Project notes") and ":q close" not in screen())
         send("Escape", "2")
         wait_for("the turn notes axis", lambda: axis("2 Turn notes"))
         send("G")
@@ -503,21 +513,63 @@ def check_clients(path, repo, cli, env, api, channel):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=channel)
             try:
-                with browser.new_context() as context:
+                with browser.new_context(timezone_id="America/New_York") as context:
                     direct = context.new_page()
                     code = api.request("browser-login", {})["code"]
-                    direct.goto(api.base + "/#login?" + urlencode({"code": code, "project": PROJECT}))
+                    direct.goto(api.base + "/#login?" + urlencode({
+                        "code": code, "project": PROJECT, "time_zone": "Asia/Seoul",
+                    }))
                     direct.get_by_role("heading", name=PROJECT, exact=True).wait_for()
+                    zone_button = direct.get_by_role("button", name="Time zone · Asia/Seoul", exact=True)
+                    zone_button.wait_for()
+                    start = direct.locator(".rowbtn time").first
+                    expected_time = """(el, zone) => new Intl.DateTimeFormat('en-US', {
+                        timeZone: zone, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                    }).format(new Date(el.dateTime))"""
+                    assert start.inner_text() == start.evaluate(expected_time, "Asia/Seoul")
                     assert direct.url == api.base + "/#" + quote(PROJECT, safe="")
                     assert not direct.get_by_label("Server access token").is_visible()
                     cookie = next(cookie for cookie in context.cookies() if cookie["name"] == "journal")
                     assert cookie["expires"] > time.time()
                     direct.reload()
                     direct.get_by_role("heading", name=PROJECT, exact=True).wait_for()
+                    zone_button.click()
+                    field = direct.get_by_label("IANA time zone")
+                    assert field.input_value() == "Asia/Seoul"
+                    field.fill("Invalid/Fixture")
+                    direct.get_by_role("button", name="Save", exact=True).click()
+                    direct.get_by_role("alert").get_by_text("Enter an IANA time zone", exact=False).wait_for()
+                    field.fill("UTC")
+                    direct.get_by_role("button", name="Save", exact=True).click()
+                    direct.get_by_role("button", name="Time zone · UTC", exact=True).click()
+                    assert start.inner_text() == start.evaluate(expected_time, "UTC")
+                    direct.get_by_role("button", name="Use browser time zone").click()
+                    direct.get_by_role("button", name="Time zone · America/New_York (browser)", exact=True).wait_for()
+                    assert start.inner_text() == start.evaluate(expected_time, "America/New_York")
                 page = browser.new_page()
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
+                page.emulate_media(color_scheme="dark")
                 page.goto(api.base)
+                theme = page.get_by_role("group", name="Theme", exact=True)
+                system_theme = theme.get_by_role("button", name="System theme", exact=True)
+                dark_theme = theme.get_by_role("button", name="Dark theme", exact=True)
+                light_theme = theme.get_by_role("button", name="Light theme", exact=True)
+                assert system_theme.get_attribute("aria-pressed") == "true"
+                root = page.locator("html")
+                assert root.get_attribute("data-theme") == "dark"
+                page.emulate_media(color_scheme="light")
+                page.wait_for_function("document.documentElement.dataset.theme === 'light'")
+                dark_theme.click()
+                assert root.get_attribute("data-theme") == "dark"
+                page.reload()
+                assert dark_theme.get_attribute("aria-pressed") == "true"
+                assert root.get_attribute("data-theme") == "dark"
+                light_theme.click()
+                page.emulate_media(color_scheme="dark")
+                assert root.get_attribute("data-theme") == "light"
+                system_theme.click()
+                assert root.get_attribute("data-theme") == "dark"
                 page.get_by_label("Server access token").fill(api.token)
                 page.get_by_role("button", name="Connect", exact=True).click()
                 page.get_by_role("link", name=PROJECT, exact=True).click()
@@ -561,7 +613,19 @@ def check_clients(path, repo, cli, env, api, channel):
                 preview_paragraphs = page.locator("dialog .note-preview p")
                 preview_paragraphs.nth(1).wait_for()
                 assert preview_paragraphs.all_inner_texts() == ["\n".join(expected_lines[:3]), paragraph]
-                page.get_by_role("button", name="Close", exact=True).click()
+                page.get_by_label("Note text").focus()
+                page.keyboard.press("Escape")
+                assert "Ctrl+; normal / cancel" in page.locator(".editor-hint").inner_text()
+                page.keyboard.press("Control+;")
+                page.keyboard.type(":help")
+                page.keyboard.press("Enter")
+                page.get_by_role("heading", name="Editor keys").wait_for()
+                page.keyboard.press("Control+;")
+                page.get_by_role("heading", name="Editor keys").wait_for(state="hidden")
+                assert page.get_by_label("Note text").is_visible()
+                assert not page.locator("#close").is_visible()
+                page.keyboard.type(":q")
+                page.keyboard.press("Enter")
                 page.locator(".note").filter(has_text=NOTE).get_by_role(
                     "button", name="Edit", exact=True
                 ).click()
@@ -569,7 +633,20 @@ def check_clients(path, repo, cli, env, api, channel):
                 page.get_by_label("Note text").fill("## " + EDIT)
                 page.get_by_role("button", name="Save", exact=True).click()
                 page.get_by_text("Insert · Saved", exact=True).wait_for()
-                page.get_by_role("button", name="Close", exact=True).click()
+                page.get_by_label("Note text").focus()
+                page.keyboard.press("Escape")
+                page.get_by_text("Insert · Saved", exact=True).wait_for()
+                page.keyboard.press("Control+;")
+                page.get_by_text("Normal · Saved", exact=True).wait_for()
+                page.keyboard.press("/")
+                command_input = page.get_by_label("Editor command")
+                command_input.fill("fixture")
+                page.keyboard.press("Escape")
+                assert command_input.input_value() == "fixture"
+                page.keyboard.press("Control+;")
+                command_input.wait_for(state="hidden")
+                page.keyboard.type(":q")
+                page.keyboard.press("Enter")
                 page.get_by_role("button", name=EDIT, exact=True).wait_for()
                 page.evaluate("""() => {
                     const fetchOriginal = window.fetch.bind(window);
@@ -667,6 +744,16 @@ def check_clients(path, repo, cli, env, api, channel):
                 card.get_by_role("button", name="Baseline run", exact=True).wait_for()
                 records = page.get_by_role("region", name="Journey and Turn notes")
                 project_notes = page.get_by_role("region", name="Project notes", exact=True)
+                record_box, note_box = records.bounding_box(), project_notes.bounding_box()
+                assert abs(record_box["y"] - note_box["y"]) < 1
+                assert abs(record_box["y"] + record_box["height"] - note_box["y"] - note_box["height"]) < 1
+                pane = records.locator("..")
+                frame = pane.evaluate("""el => {
+                    const frame = getComputedStyle(el, '::before');
+                    return [frame.left, frame.top, frame.bottom, frame.width, frame.borderTopWidth];
+                }""")
+                assert frame == ["0px", "0px", "0px", f"{int(gutter['width'])}px", "1px"]
+                assert abs(gutter["x"] - pane.bounding_box()["x"]) < 1
                 if not all(pane.evaluate("(p) => p.scrollHeight > p.clientHeight") for pane in (records, project_notes)):
                     raise RuntimeError("Both fixture panes must have scrollable content")
                 project_notes.evaluate("(p) => { p.scrollTop = p.scrollHeight; }")
@@ -686,6 +773,11 @@ def check_clients(path, repo, cli, env, api, channel):
                 background = first.evaluate(frame_background)
                 assert background.startswith("linear-gradient(")
                 assert first.locator("..").locator(".turn-notes-cell").evaluate(frame_background) == background
+                page.get_by_text("Move within the session", exact=False).wait_for()
+                page.keyboard.press("Shift+ArrowDown")
+                records.locator(".rowbtn:focus").filter(has_text="Try an empty input").wait_for()
+                page.keyboard.press("K")
+                records.locator(".rowbtn:focus").filter(has_text="Review the sample import").wait_for()
                 page.keyboard.press("j")
                 assert next_turn.locator("..").evaluate("(card) => card.classList.contains('selected-session')")
                 assert records.locator('[data-session="review"].selected-session').count() == 0
@@ -718,6 +810,22 @@ def check_clients(path, repo, cli, env, api, channel):
                     for key in keys:
                         page.keyboard.press(key)
                     records.locator(".rowbtn:focus").filter(has_text=prompt).wait_for()
+                cells.filter(has_text="Review archived import case 21").locator(".rowbtn").focus()
+                project_scroll = project_notes.evaluate("p => p.scrollTop")
+                page.keyboard.press("Shift+ArrowUp")
+                records.locator(".rowbtn:focus").filter(has_text="Review archived import case 20").wait_for()
+                assert project_notes.evaluate("p => p.scrollTop") == project_scroll
+                page.keyboard.press("J")
+                records.locator(".rowbtn:focus").filter(has_text="Review archived import case 21").wait_for()
+                page.get_by_label("Journey", exact=True).uncheck()
+                notes_region = page.get_by_role("region", name="Turn notes", exact=True)
+                empty_case = notes_region.locator('[data-turn="archive-21"]').get_by_role("button", name="+ Note", exact=True)
+                empty_case.focus()
+                page.keyboard.press("Shift+ArrowUp")
+                notes_region.locator('[data-turn="archive-20"] .note-title:focus').wait_for()
+                page.keyboard.press("Shift+ArrowDown")
+                notes_region.locator('[data-turn="archive-21"] button:focus').get_by_text("+ Note", exact=True).wait_for()
+                page.get_by_label("Journey", exact=True).check()
                 page.get_by_role("button", name="Earlier turns", exact=True).click()
                 cells.filter(has_text="Review archived import case 00").wait_for()
                 page.get_by_role("button", name="Newer turns", exact=True).click()
@@ -737,6 +845,101 @@ def check_clients(path, repo, cli, env, api, channel):
                 largest = page.get_by_role("table", name="Largest turns")
                 largest.get_by_role("button", name=SUMMARY, exact=True).click()
                 page.get_by_role("dialog").get_by_text(ANSWER, exact=True).wait_for()
+                page.get_by_role("button", name="Close", exact=True).click()
+                page.get_by_role("link", name="All projects", exact=True).click()
+                page.get_by_role("button", name="New note project", exact=True).click()
+                page.get_by_label("Project name").fill("Fixture notebook")
+                page.get_by_role("button", name="Create", exact=True).click()
+                page.get_by_role("heading", name="Fixture notebook", exact=True).wait_for()
+                page.get_by_role("link", name="All projects", exact=True).click()
+                page.get_by_role("link", name="Fixture notebook", exact=True).wait_for()
+                page.get_by_role("button", name="New note group").click()
+                page.get_by_label("Group name").fill("Fixture plans")
+                page.get_by_role("button", name="Create", exact=True).click()
+                page.get_by_role("heading", name="Fixture plans", exact=True).wait_for()
+                assert not page.get_by_label("Journey", exact=True).is_visible()
+                assert not page.get_by_text("Session filter", exact=True).is_visible()
+                page.set_viewport_size({"width": 390, "height": 760})
+                page.get_by_role("button", name="Add project note").focus()
+                page.keyboard.press("n")
+                memo = "# Group memo\n\n" + "한글 메모 " * 40 + "https://example.com/" + "fixture" * 35
+                note_text = page.get_by_label("Note text")
+                note_text.fill("abc\ndef\nghi")
+                for key in ("Control+;", "g", "g", "0", "Control+v", "j", "l"):
+                    page.keyboard.press(key)
+                page.wait_for_function("document.querySelectorAll('.vi-block-selection span').length === 2")
+                page.keyboard.press("c")
+                page.keyboard.insert_text("한")
+                page.keyboard.press("Control+;")
+                assert note_text.input_value() == "한c\n한f\nghi"
+                page.keyboard.press("u")
+                assert note_text.input_value() == "abc\ndef\nghi"
+                page.keyboard.press("Control+r")
+                assert note_text.input_value() == "한c\n한f\nghi"
+                page.keyboard.press(":")
+                page.get_by_label("Editor command").fill("%s/한/once/g")
+                page.keyboard.press("Enter")
+                assert note_text.input_value() == "oncec\noncef\nghi"
+                wrapped = "abcdefghijklmnopqrstuvwxyz" * 5 + "\nnext"
+                note_text.fill(wrapped)
+                for key in ("Control+;", "g", "g", "0", "g", "j"):
+                    page.keyboard.press(key)
+                assert 0 < note_text.evaluate("area => area.selectionStart") < wrapped.index("\n")
+                for key in ("g", "k"):
+                    page.keyboard.press(key)
+                assert note_text.evaluate("area => area.selectionStart") == 0
+                note_text.fill("  alpha.beta next\n  finish")
+                note_text.evaluate("area => area.setSelectionRange(0, 0)")
+                page.keyboard.press("Control+;")
+                for key, position in (("^", 2), ("e", 6), ("w", 7), ("w", 8), ("e", 11), ("W", 13), ("B", 2)):
+                    page.keyboard.press(key)
+                    assert note_text.evaluate("area => area.selectionStart") == position, key
+                page.keyboard.press("A")
+                page.keyboard.type("!")
+                assert note_text.input_value() == "  alpha.beta next!\n  finish"
+                note_text.fill(memo)
+                assert note_text.evaluate("area => area.scrollWidth <= area.clientWidth + 1")
+                page.locator(".wrap-gutter span").first.wait_for(state="attached")
+                assert note_text.evaluate("area => getComputedStyle(area).wordBreak") == "break-all"
+                page.keyboard.press("Control+;")
+                page.keyboard.type(":wq")
+                page.keyboard.press("Enter")
+                page.get_by_role("button", name="Group memo", exact=True).wait_for()
+                page.get_by_role("button", name="New project in group").click()
+                page.get_by_label("Project name").fill("Fixture follow-up")
+                page.get_by_role("button", name="Create", exact=True).click()
+                page.get_by_role("heading", name="Fixture follow-up").wait_for()
+                assert not page.get_by_role("button", name="Group memo", exact=True).is_visible()
+                page.get_by_role("link", name="Fixture plans", exact=True).click()
+                page.get_by_role("navigation", name="Projects in this group").get_by_role(
+                    "link", name="Fixture follow-up"
+                ).wait_for()
+                page.get_by_role("button", name="Group memo", exact=True).click()
+                assert page.get_by_label("Note text").count() == 0
+                page.get_by_role("dialog").get_by_text(memo.split("\n\n", 1)[1], exact=True).wait_for()
+                page.get_by_role("dialog").get_by_role("button", name="Edit", exact=True).click()
+                page.keyboard.press("i")
+                page.context.set_offline(True)
+                note_text.fill("# Discarded fixture edit")
+                has_fixture_draft = """() => Object.entries(localStorage).some(([key, value]) =>
+                    key.startsWith("agent-journal:draft:") && JSON.parse(value).body === "# Discarded fixture edit")"""
+                page.wait_for_function(has_fixture_draft)
+                page.keyboard.press("Control+;")
+                page.keyboard.type(":q!")
+                page.keyboard.press("Enter")
+                note_text.wait_for(state="hidden")
+                assert not page.evaluate(has_fixture_draft)
+                assert page.get_by_role("button", name="Discarded fixture edit", exact=True).count() == 0
+                page.context.set_offline(False)
+                page.reload()
+                page.get_by_role("button", name="Group memo", exact=True).click()
+                page.get_by_role("dialog").get_by_text(memo.split("\n\n", 1)[1], exact=True).wait_for()
+                page.get_by_role("button", name="Status", exact=True).click()
+                page.keyboard.press("1")
+                page.locator('#modalTitle[data-priority="highlighted"]').wait_for()
+                page.reload()
+                page.get_by_role("button", name="Group memo", exact=True).click()
+                page.locator('#modalTitle[data-priority="highlighted"]').wait_for()
                 legacy_browser_pages(browser, api, page.context.cookies())
                 if errors:
                     raise RuntimeError(f"Browser errors: {errors}")

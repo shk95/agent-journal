@@ -1,3 +1,4 @@
+import curses
 import time
 import unittest
 from concurrent.futures import Future
@@ -8,7 +9,7 @@ from agent_journal.client_state import ClientState
 from agent_journal.common import JournalHTTPError
 from agent_journal.text_layout import fit, markdown_preview, wrap
 from agent_journal.tui import Terminal
-from agent_journal.tui_editor import Editor, Paste
+from agent_journal.vi import Editor, Paste, editor_rows
 
 
 class FixtureApi:
@@ -90,6 +91,34 @@ class EditingTests(unittest.TestCase):
             draft = terminal.state.drafts["note"]
             self.assertEqual((draft["version"], draft["body"]), (2, "Saved text plus another edit"))
 
+    def test_terminal_force_quit_discards_the_draft_while_a_save_is_running(self):
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"AGENT_JOURNAL_HOME": directory}),
+            patch("agent_journal.tui.terminal_palette", return_value=([], 0)),
+        ):
+            terminal = Terminal(None, FixtureApi(), "example/fixture")
+            note = {"id": "note", "turn": None, "thread": None, "version": 1, "body": "Server text"}
+            terminal.open_note(note, [], edit=True)
+            for key in "A!":
+                terminal.detail_key(key)
+            terminal.save(immediate=True)
+            job = Future()
+            terminal.state.saves["note"] = job, terminal.state.drafts["note"].copy()
+            terminal.detail_key("?")
+            terminal.save(immediate=True)
+            for key in ("\x1b", ":", "q", "!", "\n"):
+                terminal.detail_key(key)
+            self.assertIsNone(terminal.item)
+            self.assertNotIn("note", terminal.state.drafts)
+            self.assertFalse(terminal.state.draft_path("note").exists())
+            job.set_result(2)
+            terminal.state.poll(time.time())
+            self.assertNotIn("note", terminal.state.drafts)
+            self.assertNotIn("note", terminal.state.saves)
+            terminal.open_note(note, [], edit=True)
+            self.assertEqual(terminal.item.editor.text, "Server text!")
+
     def test_graphemes_are_intact_in_display_and_editing(self):
         self.assertEqual(fit("한글", 2), "한")
         self.assertEqual(fit("e\u0301", 1), "é")
@@ -108,6 +137,46 @@ class EditingTests(unittest.TestCase):
             list(wrap(markdown_preview(source), 80)),
             ["First line", "Second line", "Third line", "Fourth line", "", "Next paragraph"],
         )
+
+    def test_editor_wraps_for_display_and_only_closes_on_command(self):
+        body = "one two three\n한글👩‍💻\n"
+        editor = Editor({"body": body}, mode="Insert")
+        self.assertEqual(editor_rows(body, 8), [
+            (0, "one two ", False), (8, "three", True), (14, "한글👩‍💻", False), (20, "", False),
+        ])
+        self.assertEqual(list(wrap("hello world", 5)), ["hello", " worl", "d"])
+        self.assertEqual(list(wrap("한글 메모", 4)), ["한글", " 메", "모"])
+        self.assertEqual(list(wrap("one two three\nend", 8, mark=True)), ["  one tw", "↳ o thre", "↳ e", "  end"])
+        editor.width = 8
+        editor.position = 2
+        editor.input(curses.KEY_DOWN)
+        self.assertEqual(editor.position, 10)
+        editor.input(curses.KEY_UP)
+        self.assertEqual(editor.position, 2)
+        self.assertIsNone(editor.input("\x1b"))
+        self.assertEqual(editor.mode, "Normal")
+        for key in ("\x1b", ":", "w", "\x1b", "\n", ":", "q", "!"):
+            self.assertIsNone(editor.input(key))
+        self.assertEqual(editor.input("\n"), "discard-close")
+        for key in (":", "q"):
+            self.assertIsNone(editor.input(key))
+        self.assertEqual(editor.input("\n"), "close")
+        self.assertEqual(editor.note["body"], body)
+
+    def test_vi_word_motions_and_line_insert_commands(self):
+        text = "  alpha.beta next\n  finish"
+        editor = Editor({"body": text})
+        for keys, expected in (("^", 2), ("e", 6), ("w", 7), ("w", 8), ("e", 11), ("W", 13), ("B", 2)):
+            editor.input(keys)
+            self.assertEqual(editor.position, expected)
+        editor.input("A")
+        self.assertEqual((editor.mode, editor.position), ("Insert", text.index("\n")))
+        editor.input("!")
+        editor.input("\x1b")
+        editor.input("I")
+        self.assertEqual((editor.mode, editor.position), ("Insert", 2))
+        editor.input("+")
+        self.assertEqual(editor.note["body"], "  +alpha.beta next!\n  finish")
 
     def test_detail_preview_omits_only_a_leading_title(self):
         note = "한글 **노트**\n===\n\nText.\n\n## Keep this heading"

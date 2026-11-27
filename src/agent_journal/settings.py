@@ -2,6 +2,7 @@
 
 import json
 from fcntl import LOCK_EX, flock
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_EXPLANATION_QUALITY = "Contextual"
 EXPLANATION_LEVELS = {
@@ -23,11 +24,19 @@ def quality_name(value):
         raise ValueError("Choose an explanation quality: Basic, Contextual, or In-depth.") from None
 
 
+def display_zone(value=None):
+    try:
+        return ZoneInfo("UTC" if value in (None, "default") else value)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        raise ValueError("Enter an IANA time zone such as Asia/Seoul or UTC, or use default.") from None
+
+
 def load_settings(root):
     defaults = {
         "explanation_quality": DEFAULT_EXPLANATION_QUALITY,
         "explanation_levels": EXPLANATION_LEVELS.copy(),
         "measure_explanation_usage": True,
+        "time_zone": None,
     }
     path = root / "settings.json"
     try:
@@ -50,7 +59,7 @@ def load_settings(root):
     return settings
 
 
-def update_settings(root, *, quality=None, measure_usage=None):
+def update_settings(root, *, quality=None, measure_usage=None, time_zone=None):
     from .client_state import write_state
 
     path = root / "settings.json"
@@ -61,6 +70,10 @@ def update_settings(root, *, quality=None, measure_usage=None):
             settings["explanation_quality"] = quality_name(quality)
         if measure_usage is not None:
             settings["measure_explanation_usage"] = measure_usage
-        if quality is not None or measure_usage is not None or not path.exists():
+        if time_zone is not None:
+            time_zone = time_zone.strip()
+            display_zone(time_zone)
+            settings["time_zone"] = time_zone
+        if any(value is not None for value in (quality, measure_usage, time_zone)) or not path.exists():
             write_state(path, settings, durable=True, indent=2)
         return settings

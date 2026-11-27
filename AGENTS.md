@@ -6,7 +6,7 @@ When asked to install the Agent Journal client, use the [standalone installer](d
 
 ## Repository development
 
-- Keep server, client, web, and tests in this repository. Run the checks in `docs/SETUP.md` before committing.
+- Keep server, client, web, and tests in this repository. Run the [local checks](docs/DEVELOPMENT.md#automated-checks) before committing.
 - Run functional, Codex, UI, and deployment integration tests locally. Keep GitHub Actions focused on public repository checks and release packaging checks.
 - Use English by default for product UI, generated summaries, diagnostics, source comments, repository documentation, and Git messages. Preserve the original language of transcripts and user-authored notes.
 - Use `master` as the default branch.

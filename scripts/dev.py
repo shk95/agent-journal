@@ -321,12 +321,17 @@ def seed(api):
 
 def demo(client, port):
     from agent_journal.common import Api
-    from agent_journal.server import make_server
+    from agent_journal.server import JournalHandler, make_server
+
+    class FixtureWebHandler(JournalHandler):
+        def browser_authenticated(self, cookie, session):
+            return True
 
     access = secrets.token_urlsafe(32)
     with tempfile.TemporaryDirectory(prefix="agent-journal-demo-") as folder:
         database = Path(folder) / "server.sqlite3"
-        with make_server("127.0.0.1", port, database, access) as server:
+        handler = FixtureWebHandler if client == "web" else JournalHandler
+        with make_server("127.0.0.1", port, database, access, handler=handler) as server:
             server.browser_cookie = f"journal_demo_{server.server_port}"
             base = f"http://127.0.0.1:{server.server_port}"
             os.environ.update(
@@ -349,7 +354,6 @@ def demo(client, port):
 
                     url = base + "/#" + quote(FIXTURE, safe="")
                     print(f"Fixture journal: {url}")
-                    print(f"Temporary access token: {access}")
                     print("Press Ctrl+C to stop the demo.", flush=True)
                     webbrowser.open_new_tab(url)
                     threading.Event().wait()

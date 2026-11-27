@@ -1,7 +1,7 @@
 "use strict";
 
 const shellCache = "agent-journal-shell-v1";
-const shellPaths = ["/", "/app.js", "/notes.js", "/style.css"];
+const shellPaths = ["/", "/app.js", "/vi.js", "/notes.js", "/style.css", "/theme.js"];
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(shellCache)

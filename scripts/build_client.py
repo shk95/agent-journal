@@ -39,6 +39,8 @@ def main():
             str(dist),
             "--collect-data",
             "agent_journal",
+            "--collect-all",
+            "tzdata",
             "--copy-metadata",
             "agent-journal",
             str(ROOT / "src" / "agent_journal" / "__main__.py"),

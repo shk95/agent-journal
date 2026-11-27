@@ -131,11 +131,9 @@ function pumpDrafts() {
     const sent = { ...draft };
     noteWrites.set(key, saveDraft(sent).then(version => {
       const current = noteDrafts.get(key);
-      if (!current) return;
-      const unchanged = current.body === sent.body;
       if (activeNoteEditor?.key === key) activeNoteEditor.acknowledge(version);
-      if (unchanged) discardDraft(key);
-      else {
+      if (current?.body === sent.body) discardDraft(key);
+      else if (current) {
         current.version = version;
         delete current.error;
         checkpointDraft(current);
@@ -171,7 +169,7 @@ function mergeDrafts(project, turns, notes) {
   return [...result.values()];
 }
 
-const inlineMarkdown = /\\([\\*_\[\]#!<>&\x60])|\x60([^\x60\n]+)\x60|!?\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\\?\n/gu;
+const inlineMarkdown = /\\([\\*_\[\]#!<>&\x60])|\x60([^\x60\n]+)\x60|!?\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_/gu;
 
 function renderInline(container, text) {
   let offset = 0;
@@ -189,11 +187,30 @@ function renderInline(container, text) {
         } else container.append(match[3]);
       } catch { container.append(match[3]); }
     } else if (match[5] ?? match[6]) container.append(node("strong", match[5] ?? match[6]));
-    else if (match[7] ?? match[8]) container.append(node("em", match[7] ?? match[8]));
-    else container.append(node("br"));
+    else container.append(node("em", match[7] ?? match[8]));
     offset = match.index + match[0].length;
   }
   container.append(text.slice(offset));
+}
+
+function wrapText(container, text, render = (line, value) => { line.textContent = value; }) {
+  const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+  const content = document.createDocumentFragment();
+  for (const [index, value] of lines.entries()) {
+    if (index) content.append("\n");
+    const line = node("span", undefined, "wrap-line");
+    render(line, value, index < lines.length - 1);
+    content.append(line);
+  }
+  container.append(content);
+  return container;
+}
+
+function renderWrappedInline(container, text) {
+  return wrapText(container, text, (line, value, followed) => {
+    const prose = value.trim();
+    renderInline(line, followed ? prose.replace(/\\$/, "") : prose);
+  });
 }
 
 const atxHeading = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/;
@@ -216,7 +233,7 @@ function renderMarkdown(text, depth = 0) {
       while (i < lines.length && !closing.test(lines[i])) code.push(lines[i++]);
       if (i < lines.length) i++;
       const pre = node("pre");
-      pre.append(node("code", code.join("\n")));
+      pre.append(wrapText(node("code"), code.join("\n")));
       out.append(pre);
       continue;
     }
@@ -224,13 +241,13 @@ function renderMarkdown(text, depth = 0) {
     const entry = line.match(listLine);
     if (heading) {
       const title = node("h" + Math.min(6, heading[1].length + 1));
-      renderInline(title, (heading[2] ?? "").replace(/(?:^|[ \t]+)#+[ \t]*$/, "").trim());
+      renderWrappedInline(title, (heading[2] ?? "").replace(/(?:^|[ \t]+)#+[ \t]*$/, "").trim());
       out.append(title);
     } else if (indentCode.test(line)) {
       const code = [line.replace(indentCode, "")];
       while (indentCode.test(lines[i] ?? "")) code.push(lines[i++].replace(indentCode, ""));
       const pre = node("pre");
-      pre.append(node("code", code.join("\n")));
+      pre.append(wrapText(node("code"), code.join("\n")));
       out.append(pre);
     } else if (entry) {
       const list = node(entry[1] === undefined ? "ul" : "ol");
@@ -238,7 +255,7 @@ function renderMarkdown(text, depth = 0) {
       let current = entry;
       do {
         const item = node("li");
-        renderInline(item, current[2]);
+        renderWrappedInline(item, current[2]);
         list.append(item);
         current = lines[i]?.match(listLine);
         if (current && (current[1] === undefined) === (entry[1] === undefined)) i++;
@@ -259,7 +276,7 @@ function renderMarkdown(text, depth = 0) {
       const underline = lines[i]?.match(setextHeading);
       if (underline) i++;
       const block = node(underline ? (underline[1][0] === "=" ? "h2" : "h3") : "p");
-      renderInline(block, content.join(underline ? " " : "\n"));
+      renderWrappedInline(block, content.join(underline ? " " : "\n"));
       out.append(block);
     }
   }
@@ -290,16 +307,17 @@ function noteDetail(note, focusStatus = false) {
     ? action("Status", () => chooseNoteStatus(note, controls, box))
     : null;
   if (status) controls.append(status);
-  if (note.turn && note.version != null)
-    controls.append(action("Cut", () => {
+  const cut = note.turn && note.version != null
+    ? action("Cut", () => {
       noteCut = note;
       $("detail").close();
       $("connection").textContent = "Turn note cut · select a destination";
       noteEpoch++;
       refresh();
-    }));
-  if (note.version != null)
-    controls.append(action("Delete", () => confirmNoteDelete(note, box)));
+    }) : null;
+  const remove = note.version != null ? action("Delete", () => confirmNoteDelete(note, box)) : null;
+  if (cut) controls.append(cut);
+  if (remove) controls.append(remove);
   const title = displayTitle(note);
   const markdown = renderMarkdown(note.body);
   const heading = markdown.firstElementChild;
@@ -314,6 +332,8 @@ function noteDetail(note, focusStatus = false) {
       return;
     if (event.key === "e") { event.preventDefault(); noteEditor(note); }
     if (event.key === "s" && status) { event.preventDefault(); status.click(); }
+    if (event.key === "x" && cut) { event.preventDefault(); cut.click(); }
+    if (event.key === "D" && remove) { event.preventDefault(); remove.click(); }
   };
 }
 
@@ -353,6 +373,7 @@ function chooseNoteStatus(note, controls, box) {
   options.find(button => button.getAttribute("aria-pressed") === "true")?.focus();
   $("detail").onkeydown = event => {
     if (event.key === "Escape") { event.preventDefault(); noteDetail(note, true); }
+    if (/^[123]$/.test(event.key)) { event.preventDefault(); options[Number(event.key) - 1].click(); }
   };
 }
 
@@ -428,26 +449,148 @@ function editNote(project, target = {}, note = null) {
     thread: target.thread ?? null, turn: target.turn ?? null }, true);
 }
 
-function graphemeMotion(text, position, key) {
-  if (key === "h") return segments.segment(text).containing(Math.max(0, position - 1))?.index ?? 0;
-  if (key === "l") {
-    const cluster = segments.segment(text).containing(position);
-    return cluster ? cluster.index + cluster.segment.length : text.length;
+function editorWrapping(area, container) {
+  const gutter = node("div", undefined, "wrap-gutter");
+  const markers = node("div");
+  const selection = node("div", undefined, "vi-block-selection");
+  const blocks = node("div");
+  const measure = node("div", undefined, "wrap-measure");
+  const source = document.createTextNode("");
+  const endMarker = document.createTextNode("\u200b");
+  const range = document.createRange();
+  gutter.setAttribute("aria-hidden", "true");
+  selection.setAttribute("aria-hidden", "true");
+  measure.setAttribute("aria-hidden", "true");
+  gutter.append(markers);
+  selection.append(blocks);
+  measure.append(source, endMarker);
+  container.append(area, gutter, selection, measure);
+  let frame;
+  let ranges = [];
+
+  function scroll() {
+    markers.style.transform = `translateY(${-area.scrollTop}px)`;
+    blocks.style.transform = markers.style.transform;
   }
-  const start = position ? text.lastIndexOf("\n", position - 1) + 1 : 0;
-  const newline = text.indexOf("\n", position);
-  const end = newline < 0 ? text.length : newline;
-  if (key === "0") return start;
-  if (key === "$") return end;
-  if (key === "G") return text.length;
-  if (key === "gg") return 0;
-  if (key === "j" && end === text.length || key === "k" && start === 0) return position;
-  const nextStart = key === "j" ? end + 1 : start > 1 ? text.lastIndexOf("\n", start - 2) + 1 : 0;
-  const nextEnd = text.indexOf("\n", nextStart);
-  const column = [...segments.segment(text.slice(start, position))].length;
-  const next = text.slice(nextStart, nextEnd < 0 ? text.length : nextEnd);
-  return nextStart + [...segments.segment(next)].slice(0, column)
-    .reduce((total, part) => total + part.segment.length, 0);
+
+  function populateMeasure(text = area.value) {
+    const width = `${area.clientWidth}px`;
+    if (measure.style.width !== width) measure.style.width = width;
+    if (source.data !== text) source.data = text;
+  }
+
+  function caretRect(position) {
+    const text = source.data;
+    if (position === text.length) {
+      range.setStart(endMarker, 0);
+      range.collapse(true);
+      return range.getBoundingClientRect();
+    }
+    const part = VI_SEGMENTS.segment(text).containing(position);
+    range.setStart(source, part.index);
+    range.setEnd(source, part.index + part.segment.length);
+    const { left, top, height } = range.getBoundingClientRect();
+    return { left, top, height };
+  }
+
+  function update() {
+    frame = null;
+    if (!area.clientWidth) return;
+    populateMeasure();
+    const lineHeight = parseFloat(getComputedStyle(measure).lineHeight);
+    const top = measure.getBoundingClientRect().top + parseFloat(getComputedStyle(measure).paddingTop);
+    const content = document.createDocumentFragment();
+    let start = 0;
+    for (const line of source.data.split("\n")) {
+      if (line) {
+        range.setStart(source, start);
+        range.setEnd(source, start + line.length);
+        const rows = new Set([...range.getClientRects()].map(rect => Math.round((rect.top - top) / lineHeight)));
+        rows.delete(Math.min(...rows));
+        for (const row of rows) {
+          const mark = node("span", "↳");
+          mark.style.top = `${row * lineHeight}px`;
+          content.append(mark);
+        }
+      }
+      start += line.length + 1;
+    }
+    markers.replaceChildren(content);
+    const origin = measure.getBoundingClientRect();
+    const highlight = document.createDocumentFragment();
+    for (const [start, end] of ranges) {
+      if (start === end) continue;
+      range.setStart(source, start);
+      range.setEnd(source, end);
+      for (const rect of range.getClientRects()) {
+        const block = node("span");
+        block.style.left = `${rect.left - origin.left}px`;
+        block.style.top = `${Math.round((rect.top - top) / lineHeight) * lineHeight + top - origin.top}px`;
+        block.style.width = `${rect.width}px`;
+        block.style.height = `${lineHeight}px`;
+        highlight.append(block);
+      }
+    }
+    blocks.replaceChildren(highlight);
+    scroll();
+  }
+
+  function schedule() {
+    if (frame == null) frame = requestAnimationFrame(update);
+  }
+
+  const observer = new ResizeObserver(schedule);
+  observer.observe(area);
+  area.addEventListener("scroll", scroll);
+  return {
+    schedule,
+    select(block) {
+      if (block.length || ranges.length) {
+        ranges = block;
+        schedule();
+      }
+    },
+    move(text, position, rows) {
+      if (!text) return position;
+      populateMeasure(text);
+      const initial = caretRect(position);
+      const height = parseFloat(getComputedStyle(measure).lineHeight);
+      const top = Math.max(caretRect(0).top, Math.min(caretRect(text.length).top, initial.top + rows * height));
+      if (Math.abs(top - initial.top) < 1) return position;
+      let low = 0, high = text.length;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        if (caretRect(mid).top < top - 1) low = mid + 1;
+        else high = mid;
+      }
+      let cursor = VI_SEGMENTS.segment(text).containing(low)?.index ?? low;
+      let target = cursor, distance = Infinity;
+      while (true) {
+        const rect = caretRect(cursor);
+        if (rect.top > top + 1) break;
+        if (rect.top >= top - 1 && Math.abs(rect.left - initial.left) < distance) {
+          target = cursor;
+          distance = Math.abs(rect.left - initial.left);
+        }
+        if (cursor === text.length) break;
+        cursor = viNext(text, cursor);
+      }
+      return target;
+    },
+    reveal(position) {
+      populateMeasure();
+      const rect = caretRect(position);
+      if (!rect.height) return;
+      const top = rect.top - measure.getBoundingClientRect().top;
+      if (top < area.scrollTop) area.scrollTop = top;
+      else if (top + rect.height > area.scrollTop + area.clientHeight)
+        area.scrollTop = top + rect.height - area.clientHeight;
+    },
+    close() {
+      observer.disconnect();
+      if (frame != null) cancelAnimationFrame(frame);
+    },
+  };
 }
 
 function noteEditor(note, insert = false) {
@@ -456,18 +599,37 @@ function noteEditor(note, insert = false) {
   if (noteMutations.has(key)) return;
   const form = node("form", undefined, "note-editor");
   const area = node("textarea");
+  const sourceEditor = node("div", undefined, "note-source-editor");
+  const wrapping = editorWrapping(area, sourceEditor);
+  const editor = new ViEditor(work.body, insert ? "Insert" : "Normal", wrapping.move);
   const preview = node("div", undefined, "note-preview");
   const status = node("span", undefined, "meta");
   const conflict = node("div", undefined, "note-conflict");
-  let mode = insert ? "Insert" : "Normal";
-  let sequence = "";
-  let command = null;
+  const commandLine = node("label", undefined, "vi-command");
+  const commandPrefix = node("span");
+  const commandInput = node("input");
+  commandInput.type = "text";
+  commandInput.maxLength = 499;
+  commandInput.setAttribute("aria-label", "Editor command");
+  commandInput.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  commandLine.hidden = true;
+  commandLine.append(commandPrefix, commandInput);
+  const help = node("section", undefined, "vi-help");
+  help.hidden = true;
+  const shortcuts = node("ul");
+  shortcuts.append(...VI_HELP.map(line => node("li", line)));
+  help.append(node("h2", "Editor keys"), shortcuts);
   let previewTimer;
   let changed = noteDrafts.has(key);
   let conflictShown = false;
-  const history = [];
 
   area.value = work.body;
+  area.wrap = "soft";
   area.maxLength = Math.max(40000, work.body.length);
   area.setAttribute("aria-label", "Note text");
   status.setAttribute("role", "status");
@@ -479,14 +641,24 @@ function noteEditor(note, insert = false) {
     action("Preview", () => form.classList.toggle("show-preview")),
     status,
   );
+  const hint = node("p", `${VI_NORMAL_SHORTCUT} normal / cancel · :help keys · :q close · :q! discard · :w save · Ctrl+P preview · ↳ wrapped line`, "meta editor-hint");
+  controls.append(hint);
   const contents = node("label", "Markdown · # Title", "note-source");
-  contents.append(area);
-  form.append(controls, contents, preview, conflict);
-  form.onsubmit = event => { event.preventDefault(); save(true); };
+  contents.append(sourceEditor);
+  form.append(controls, contents, preview, commandLine, help, conflict);
+  form.onsubmit = event => {
+    event.preventDefault();
+    if (editor.command) {
+      for (const key of commandInput.value) editor.input(key);
+      execute(editor.input("Enter"));
+    } else save(true);
+  };
 
   function update() {
-    status.textContent = mode + " · " + (changed ? draftState(key) : "Editing") +
-      (command == null ? "" : " · :" + command);
+    status.textContent = editor.mode + " · " + (changed ? draftState(key) : "Editing") +
+      (editor.recording ? " · Recording @" + editor.recording : "") +
+      (editor.pending.length ? " · " + editor.pending.join("") : "") +
+      (editor.message ? " · " + editor.message : "");
     const waiting = noteDrafts.get(key)?.conflict === true;
     if (waiting && !conflictShown) {
       conflict.replaceChildren(action("Review server version", review));
@@ -505,14 +677,49 @@ function noteEditor(note, insert = false) {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(() => preview.replaceChildren(renderMarkdown(area.value)), 140);
   }
-  function modified() {
-    if (work.body === area.value) return;
-    history.push(work.body);
-    if (history.length > 50) history.shift();
-    work.body = area.value;
-    changed = true;
-    updatePreview();
-    save(false);
+  function paintEditor() {
+    if (area.value !== editor.text) area.value = editor.text;
+    const [kind, ranges] = editor.selection();
+    const [start, end] = kind !== "block" && ranges.length ? ranges[0] : [editor.position, editor.position];
+    if (area.selectionStart !== start || area.selectionEnd !== end) {
+      area.setSelectionRange(start, end, editor.position === start ? "backward" : "forward");
+    }
+    wrapping.select(kind === "block" ? ranges : []);
+    wrapping.reveal(editor.position);
+    if (work.body !== editor.text) {
+      work.body = editor.text;
+      changed = true;
+      wrapping.schedule();
+      updatePreview();
+      save(false);
+    }
+    if (editor.command && commandLine.hidden) {
+      commandPrefix.textContent = editor.command[0];
+      commandInput.value = "";
+      commandLine.hidden = false;
+      commandInput.focus();
+    } else if (!editor.command && !commandLine.hidden) {
+      commandLine.hidden = true;
+      area.focus({ preventScroll: true });
+    }
+    if (editor.help && help.hidden) {
+      help.hidden = false;
+      help.scrollIntoView({ block: "nearest" });
+    } else if (!editor.help) help.hidden = true;
+    update();
+  }
+
+  function execute(result) {
+    paintEditor();
+    if (result === "discard-close") {
+      discardDraft(key);
+      noteEpoch++;
+      closeJournalDialog();
+      return;
+    }
+    if (result === "save" || result === "save-close") save(true);
+    if (result === "close" || result === "save-close") closeJournalDialog();
+    if (result === "review" && noteDrafts.get(key)?.conflict) review();
   }
   async function review() {
     try {
@@ -529,8 +736,8 @@ function noteEditor(note, insert = false) {
         }),
         action("Use server", () => {
           discardDraft(key);
-          activeNoteEditor = null;
           changed = false;
+          finishNoteEditing();
           noteDetail(latest);
         }),
       );
@@ -538,69 +745,88 @@ function noteEditor(note, insert = false) {
       conflict.append(node("p", error.message));
     }
   }
-  area.addEventListener("input", event => { if (!event.isComposing) modified(); });
-  area.addEventListener("compositionend", modified);
-  area.addEventListener("paste", () => { mode = "Insert"; update(); });
+  let previousPosition = 0;
+  let composing = false;
+  area.addEventListener("beforeinput", () => {
+    if (!composing) previousPosition = area.selectionStart;
+  });
+  area.addEventListener("compositionstart", () => {
+    composing = true;
+    previousPosition = area.selectionStart;
+  });
+  area.addEventListener("input", event => {
+    if (event.isComposing) wrapping.schedule();
+    else {
+      editor.nativeEdit(area.value, area.selectionStart, previousPosition);
+      paintEditor();
+    }
+  });
+  area.addEventListener("compositionend", () => {
+    composing = false;
+    editor.nativeEdit(area.value, area.selectionStart, previousPosition);
+    paintEditor();
+  });
+  area.addEventListener("paste", () => {
+    if (!editor.inserting) {
+      if (editor.anchor !== null) editor.input("Escape");
+      editor.position = area.selectionStart;
+      editor.input("i");
+    }
+  });
+  area.addEventListener("pointerup", () => {
+    if (editor.anchor !== null) editor.input("Escape");
+    editor.position = area.selectionStart;
+    wrapping.select([]);
+    update();
+  });
+  form.addEventListener("keydown", event => {
+    if (event.key !== ";" || !event.ctrlKey || event.altKey || event.metaKey ||
+        event.isComposing || composing) return;
+    event.preventDefault();
+    if (editor.inserting || (editor.anchor === null && document.activeElement === area && !editor.command)) {
+      editor.position = area.selectionStart;
+    }
+    execute(editor.input("Escape"));
+    area.focus({ preventScroll: true });
+  });
   area.addEventListener("keydown", event => {
-    if (event.isComposing) return;
+    if (event.isComposing || composing) return;
     const pressed = event.key;
     if ((event.ctrlKey || event.metaKey) && pressed === "s") {
       event.preventDefault();
       save(true);
       return;
     }
-    if (event.altKey || event.metaKey || event.ctrlKey) return;
-    if (pressed === "Escape" && mode === "Insert") {
+    if (event.ctrlKey && pressed === "p") {
       event.preventDefault();
-      mode = "Normal";
-      update();
+      form.classList.toggle("show-preview");
       return;
     }
-    if (mode === "Insert" || ["Escape", "Tab", "Shift"].includes(pressed)) return;
+    if (event.ctrlKey && pressed === "r" && !editor.inserting) {
+      event.preventDefault();
+      execute(editor.input("\x12"));
+      return;
+    }
+    if (event.ctrlKey && pressed === "v" && !editor.inserting) {
+      event.preventDefault();
+      if (editor.anchor === null) editor.position = area.selectionStart;
+      execute(editor.input("\x16"));
+      return;
+    }
+    if (event.altKey || event.metaKey || event.ctrlKey || ["Escape", "Tab", "Shift"].includes(pressed)) return;
+    if (editor.inserting && (!Object.hasOwn(VI_ARROWS, pressed) || event.shiftKey)) return;
     event.preventDefault();
-    if (command !== null) {
-      if (pressed === "Enter") {
-        if (command.startsWith("w")) save(true);
-        if (command.endsWith("q")) closeJournalDialog();
-        command = null;
-      } else if (/^[wq]$/.test(pressed)) command = (command + pressed).slice(0, 2);
-      update();
-      return;
-    }
-    if (pressed === ":") { command = ""; update(); return; }
-    const { value, selectionStart: position } = area;
-    const keypress = sequence + pressed;
-    sequence = ["g", "d"].includes(pressed) && keypress.length === 1 ? pressed : "";
-    if ("ia".includes(pressed) && pressed.length === 1) {
-      if (pressed === "a") area.setSelectionRange(graphemeMotion(value, position, "l"), graphemeMotion(value, position, "l"));
-      mode = "Insert";
-    } else if (["h", "j", "k", "l", "0", "$", "gg", "G"].includes(keypress)) {
-      const next = graphemeMotion(value, position, keypress);
-      area.setSelectionRange(next, next);
-    } else if (keypress === "x") {
-      area.setRangeText("", position, graphemeMotion(value, position, "l"), "start");
-      modified();
-    } else if (keypress === "dd") {
-      const start = graphemeMotion(value, position, "0");
-      const end = graphemeMotion(value, position, "$");
-      area.setRangeText("", start, Math.min(value.length, end + 1), "start");
-      modified();
-    } else if (keypress === "o") {
-      const end = graphemeMotion(value, position, "$");
-      area.setRangeText("\n", end, end, "end");
-      mode = "Insert";
-      modified();
-    } else if (keypress === "u" && history.length) {
-      area.value = work.body = history.pop();
-      updatePreview();
-      save(false);
-    }
-    update();
+    if (editor.anchor === null) editor.position = area.selectionStart;
+    execute(editor.input(pressed));
   });
   activeNoteEditor = {
     key, update,
     acknowledge(version) { work.version = version; },
-    leaving() { if (changed && noteDrafts.has(key)) save(true); },
+    leaving() {
+      wrapping.close();
+      clearTimeout(previewTimer);
+      if (changed && noteDrafts.has(key)) save(true);
+    },
   };
   modal(work.version == null ? "Add " + noteContext(work).toLowerCase() : "Edit " + displayTitle(work), form);
   update();

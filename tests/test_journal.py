@@ -227,6 +227,44 @@ class TestJournal(unittest.TestCase):
                 notes = endpoint(db, "GET", "notes", {"project": "test/legacy"})
                 self.assertNotIn("body_bytes", notes[0])
 
+    def test_timezone_command_sets_local_display_and_passes_it_to_web(self):
+        with closing(connect(self.server.database)) as db, db:
+            db.execute(
+                """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,items,revision)
+                   VALUES('test/p','fixture','epoch',946684800,'completed','','','[]',1)""",
+            )
+        with patch("builtins.print") as output:
+            with patch.object(sys, "argv", ["agent-journal", "timezone"]):
+                main()
+            output.assert_called_once_with("Time zone · UTC (default)")
+            output.reset_mock()
+            with patch.object(sys, "argv", ["agent-journal", "timezone", "Asia/Seoul"]):
+                main()
+            output.assert_called_once_with("Time zone · Asia/Seoul")
+            with patch.object(sys, "argv", ["agent-journal", "stats"]):
+                main()
+            self.assertTrue(any("Latest turn (Asia/Seoul)" in call.args[0] for call in output.call_args_list if call.args))
+            self.assertTrue(output.call_args.args[0].endswith("2000-01-01 09:00"))
+            with (
+                patch.object(sys, "argv", ["agent-journal", "web", "--project", "test/p"]),
+                patch("webbrowser.open_new_tab") as open_tab,
+            ):
+                main()
+                url = urlsplit(open_tab.call_args.args[0])
+                params = parse_qs(url.fragment.removeprefix("login?"))
+                self.assertEqual(params["time_zone"], ["Asia/Seoul"])
+                self.assertEqual(params["project"], ["test/p"])
+            with (
+                patch.object(sys, "argv", ["agent-journal", "timezone", "Invalid/Fixture"]),
+                self.assertRaises(SystemExit),
+            ):
+                main()
+            self.assertEqual(load_settings(self.path)["time_zone"], "Asia/Seoul")
+            with patch.object(sys, "argv", ["agent-journal", "timezone", "default"]):
+                main()
+            output.assert_called_with("Time zone · UTC (default)")
+            self.assertEqual(load_settings(self.path)["time_zone"], "default")
+
     def test_stats_command_reports_an_older_server(self):
         with (
             patch.object(sys, "argv", ["agent-journal", "stats"]),
@@ -266,6 +304,29 @@ class TestJournal(unittest.TestCase):
         self.assertTrue(first["later"])
         note_edge = self.api.request("board", project=project, thread="chosen", edge="first-note")
         self.assertEqual(note_edge["turns"][0]["turn"], "20")
+
+    def test_session_moves_across_pages_keep_chronological_context(self):
+        project = "test/p"
+        with closing(connect(self.server.database)) as db, db:
+            db.executemany(
+                """INSERT INTO turns(project,thread,turn,started,status,prompt,summary,items,revision)
+                   VALUES(?,?,?,?, 'completed', '', '', '[]', 1)""",
+                [(project, "interleaved", str(i), i) for i in range(1, 130)]
+                + [(project, "selected", "early", 3), (project, "selected", "late", 125)],
+            )
+        early, late = [3, "early", "selected"], [125, "late", "selected"]
+        for boundary, origin, target, index in (("before", late, early, -1), ("after", early, late, 0)):
+            with self.subTest(boundary=boundary):
+                moved = self.api.request("board", project=project, **{"session_" + boundary: json.dumps(origin)})
+                self.assertEqual(moved["session_target"], target)
+                self.assertEqual(moved["turns"][index]["turn"], target[1])
+                self.assertIn("interleaved", {row["thread"] for row in moved["turns"]})
+                pinned = self.api.request(
+                    "board", project=project, inclusive="true", **{boundary: json.dumps(target)},
+                )
+                self.assertEqual(moved["turns"], pinned["turns"])
+        no_move = self.api.request("board", project=project, session_before=json.dumps(early))
+        self.assertIsNone(no_move["session_target"])
 
     def test_note_titles_move_delete_and_scoped_board(self):
         project = "test/p"
@@ -713,6 +774,39 @@ class TestJournal(unittest.TestCase):
         self.assertEqual(
             [r["turn"] for r in self.api.request("overview")[0]["turns"]], ["two"]
         )
+
+    def test_note_groups_and_projects_keep_separate_notes(self):
+        group, project, standalone = ("~/" + key * 32 for key in "abc")
+        group_payload = {"project": group, "kind": "group", "name": " Fixture group "}
+        child_payload = {"project": project, "kind": "project", "name": "Fixture child", "parent": group}
+        for payload in (group_payload, child_payload, {"project": standalone, "kind": "project", "name": "Fixture project"}):
+            self.assertEqual(self.api.request("note-spaces", payload), {"project": payload["project"]})
+        self.assertEqual(self.api.request("note-spaces", group_payload), {"project": group})
+        with self.assertRaisesRegex(RuntimeError, "409"):
+            self.api.request("note-spaces", group_payload | {"name": "Another group"})
+        with self.assertRaisesRegex(RuntimeError, "400"):
+            self.api.request("note-spaces", child_payload | {"parent": standalone})
+        self.assertEqual([row["project"] for row in self.api.request("projects")], ["test/p"])
+        overview = {row["project"]: row for row in self.api.request("overview")}
+        self.assertEqual(overview.keys(), {"test/p", group, standalone})
+        for scope, name, kind in ((group, "Fixture group", "group"), (standalone, "Fixture project", "project")):
+            self.assertEqual(overview[scope], {
+                "project": scope, "name": name, "kind": kind, "active": 0, "turns": [],
+            })
+        for scope, title in ((group, "Group memo"), (project, "Project memo")):
+            note = {"project": scope, "id": title, "body": f"# {title}"}
+            self.api.request("notes", note)
+            with self.assertRaisesRegex(RuntimeError, "400"):
+                self.api.request("notes", note | {"thread": "fixture", "turn": "fixture"})
+            with self.assertRaisesRegex(RuntimeError, "400"):
+                self.api.request("register", {"project": scope})
+            board = self.api.request("board", project=scope)
+            self.assertEqual(board["turns"], [])
+            self.assertEqual([row["title"] for row in board["project_notes"]], [title])
+        children = self.api.request("board", project=group)["space"]["children"]
+        self.assertEqual(children, [{"project": project, "name": "Fixture child"}])
+        self.assertEqual(self.api.request("board", project=project)["space"]["parent_name"], "Fixture group")
+        self.assertEqual(self.api.request("stats", project=group)["projects"][0]["note_count"], 1)
 
     def test_edit_note_uses_version_and_preserves_target(self):
         self.cache.flush(self.api, scan(self.source, self.cache))

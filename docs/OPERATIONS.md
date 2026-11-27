@@ -1,4 +1,4 @@
-# Cloud operations
+# Agent Journal server and release operations
 
 Run the central server on a Linux VM with a persistent volume and an HTTPS reverse proxy. The examples use systemd and Caddy. Use a published stable release for the application and the initial host configuration.
 
@@ -16,7 +16,7 @@ cd agent-journal
 sudo python3 scripts/server_deploy.py install --release "$release_tag" --domain journal.example.com
 ```
 
-Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer verifies the release manifest and tag, builds the released commit's `#server` package, and starts the journal. Without `--release`, it selects the newest published stable server release. Pass `--auto-update` to install and enable the release timer at the same time. Use `--local` for the disposable VM test in [local development](SETUP.md#local-deployment-smoke-test).
+Omit `--domain` if HTTPS is already handled by an existing proxy. Route that proxy to `127.0.0.1:8765`. The installer verifies the release manifest and tag, builds the released commit's `#server` package, and starts the journal. Without `--release`, it selects the newest published stable server release. Pass `--auto-update` to install and enable the release timer at the same time. Use `--local` for the [disposable VM test](DEVELOPMENT.md#local-deployment-smoke-test).
 
 ```sh
 curl -f http://127.0.0.1:8765/healthz
@@ -48,7 +48,7 @@ Confirmed migration, startup, or readiness failures are recorded against the exa
 
 ```sh
 sudo python3 /opt/agent-journal/server_deploy.py status
-sudo python3 /opt/agent-journal/server_deploy.py retry v0.7.0-0123456789ab
+sudo python3 /opt/agent-journal/server_deploy.py retry v0.8.0-0123456789ab
 sudo python3 /opt/agent-journal/server_deploy.py recover
 sudo python3 /opt/agent-journal/server_deploy.py cleanup
 ```
@@ -67,33 +67,34 @@ Agent Journal guarantees client/server compatibility across stable releases with
 
 Keep existing endpoint paths, required fields, and response semantics stable within a major. Add fields or endpoints without making them mandatory for older clients. When a new client uses an optional server feature, detect support and keep the existing workflow usable on older servers.
 
-On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Run the [local checks](SETUP.md#local-development) and `just compatibility`. The compatibility check exercises both client/server directions against the stable tags in the same major. Push a tag that matches the candidate version.
+On `master`, set the shared server and client version in `pyproject.toml` and update `uv.lock`. Run the [local checks](DEVELOPMENT.md#automated-checks) and `just compatibility`. The compatibility check exercises both client/server directions against the stable tags in the same major. Use the [release validation checklist](DEVELOPMENT.md#release-validation-checklist) for workflows affected by the release. Push a tag that matches the candidate version.
 
 ```sh
 git push origin master
-git tag -a v0.7.0 -m "Agent Journal 0.7.0"
-git push origin v0.7.0
+git tag -a v0.8.0 -m "Agent Journal 0.8.0"
+git push origin v0.8.0
 ```
 
 The release workflow checks the public history, mixed client/server versions, Nix outputs, and standalone clients. On success it publishes a single GitHub Release containing the server manifest with the exact commit, three standalone client executables, client checksums, and the installer. A manual run of the Release workflow verifies packaging without publishing a tag.
 
-Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.7.0#client' -- tui` runs that release's client.
+Use the same Git tag for either Nix output. For example, `nix run 'github:shk95/agent-journal/v0.8.0#client' -- tui` runs that release's client.
 
 Declare the tested database source ranges under `[[tool.agent-journal.upgrade-from]]` in `pyproject.toml`. Each entry contains inclusive `minimum` and `maximum` stable tags. The release workflow publishes them as `upgrade_from` in the verified server manifest. Use `uv run --locked python -m tests.compatibility --database-migrations` to test same-major snapshots locally. Keep the ranges limited to tested migrations, including when releasing across a major version.
 
 Legacy releases with no source ranges are available for an explicit fresh install, including recovery into an independent deployment from a verified backup. Automated and one-shot in-place updates require a compatible range. Refresh the host controls when changing the updater itself. Application releases preserve the server token, proxy settings, and updater schedule.
 
-## Test cleanup policy
-
-Local smoke, performance, and compatibility runs use private temporary workspaces. After their processes have stopped, the runners delete the workspace on success, failure, or cancellation. On failure they save the traceback and, when available, the last 64 KiB of the isolated collector log in `.local/test-failures/`. The report directory is private. The retention policy covers these reports. Fixture databases, connection settings, browser profiles, and interactive demo data stay outside the report directory.
-
-Reports expire after 24 hours. The next local integration run removes expired reports, or an operator can run `just clean-test-reports` from the checkout. Collect any diagnostics needed for a longer investigation in private storage before expiry. Review reports for local paths and credentials before sharing. Confirm the disposition of interactive demo data separately, since an interrupted demo may contain notes written by its user.
-
-On a workstation, stop tests with `Ctrl+C` or `SIGTERM` and let the runner finish cleanup. If the runner itself must be force-killed, the supervising job owns cleanup. Use a disposable VM or a supervisor that can stop the entire job scope, including descendants that started their own sessions. For a run already interrupted on a shared workstation, verify the run's private directory and its process IDs or socket before stopping residual processes.
-
-Run the deployment scenarios on [one disposable Linux VM](SETUP.md#local-deployment-smoke-test). Keep its services and disk through the rollback and boot-recovery checks. Retire the VM and its test disk after the last check or when abandoning the run. If a failure needs investigation, keep the VM isolated until the relevant diagnostics are copied, then retire it. Apply the 24-hour diagnostic retention to those copies.
-
 ## Manual installation
+
+### Run a basic server
+
+To run the server directly from a shell, generate an access token once and use the same token on the server and work machines.
+
+```sh
+export AGENT_JOURNAL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+agent-journal serve
+```
+
+The default address is `http://127.0.0.1:8765`. Pass `--host` or `--port` to change it. The database defaults to `server.sqlite3` in the [local state directory](CONFIGURATION.md#local-state-directory). Use `serve --database /path/to/journal.sqlite3` to choose another path. For cloud use, keep the database on a persistent volume and connect through an HTTPS reverse proxy.
 
 ### Server
 
@@ -131,8 +132,6 @@ journal.example.com {
 
 Start both services and check that they restart on boot. Connect both work machines with `agent-journal connect --url https://journal.example.com` and [set up Codex](SETUP.md#set-up-codex). Ask Codex to register a repository on one machine, then open Codex in that repository on both machines. Verify that `agent-journal projects` lists the same registration on both machines and that `agent-journal web` opens the authenticated journal over HTTPS.
 
-Explanation quality and token usage are local to each work machine. Check them with `agent-journal explanation` and `agent-journal explanation-usage`. To preserve them, back up `settings.json` and `explanation-usage.sqlite3` from the local state directory. [Explanation settings](SETUP.md#explanation-settings)
-
 ## Observers
 
 The Codex session hooks start the collector as the same user that runs Codex. It needs access to the shared Codex App Server socket and the saved journal connection.
@@ -151,4 +150,8 @@ agent-journal backup --database /var/lib/agent-journal/journal.sqlite3 --output 
 
 Copy the backup to protected storage. It contains transcripts and notes. To verify it, start a separate test instance against a private copy at a new database path. Check that known turns and notes load. To restore for normal use, point the stopped application service at the verified copy or place it at a new persistent database path and restart the service.
 
-If the access token changes, update the server environment file and restart the service. Run `agent-journal connect` again on each work machine. Close any open Codex sessions to let the collector exit, then reopen Codex. Sign in again in the browser.
+To preserve explanation preferences and token counts, back up `settings.json` and `explanation-usage.sqlite3` from each work machine's local state directory. [Explanation settings](CONFIGURATION.md#explanation-settings)
+
+## Rotate the access token
+
+Update the server environment file and restart the service. Run `agent-journal connect` again on each work machine. Close any open Codex sessions to let the collector exit, then reopen Codex. Sign in again in the browser.

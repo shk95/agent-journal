@@ -208,10 +208,12 @@ class ClientState:
             if not job.done():
                 continue
             del self.saves[identifier]
-            draft = self.drafts[identifier]
+            draft = self.drafts.get(identifier)
             try:
                 version = job.result()
             except (OSError, RuntimeError) as error:
+                if draft is None:
+                    continue
                 draft["conflict"] = isinstance(
                     error, JournalHTTPError
                 ) and error.status in (404, 409)
@@ -224,9 +226,10 @@ class ClientState:
                 self.recoveries[identifier] = sent | {"version": version}
                 if len(self.recoveries) > 12:
                     del self.recoveries[next(iter(self.recoveries))]
+                if draft is None:
+                    continue
                 if draft["body"] == sent["body"]:
-                    self.draft_path(identifier).unlink(missing_ok=True)
-                    del self.drafts[identifier]
+                    self.discard(identifier)
                     continue
                 draft["version"] = version
                 draft.pop("error", None)
@@ -253,7 +256,7 @@ class ClientState:
         if not draft:
             return "Saved"
         if draft.get("conflict"):
-            return "Conflict · ^R review"
+            return "Conflict · :review"
         if draft.get("error"):
             return "Saved locally · " + draft["error"]
         return "Saved locally" if draft.get("checkpoint") is None else "Editing"

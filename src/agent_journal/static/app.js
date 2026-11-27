@@ -20,6 +20,8 @@ const pageSize = 60;
 let pageQuery = {};
 let legacyNewerPages = [];
 let activeAxis = 0;
+let focusedAxes = false;
+let selectedTurn = null;
 let selectedJourneySession = null;
 let journeyFilter = null;
 let sessionControls = null;
@@ -29,6 +31,8 @@ let detailRequest = null;
 let expandedTurnPane = null;
 const readCache = new Map();
 const detailCache = new Map();
+const timeZoneKey = "agent-journal:time-zone";
+let timeDisplay = readTimeDisplay();
 let last = "",
   version = 0;
 function node(tag, text, cls) {
@@ -40,12 +44,76 @@ function node(tag, text, cls) {
 function action(text, fn, cls) {
   const el = node("button", text, cls);
   el.type = "button";
-  el.onclick = () =>
-    Promise.resolve().then(fn).catch(
-      (err) => ($("connection").textContent = err.message),
-    );
+  el.onclick = () => runAction(fn);
   return el;
 }
+function runAction(fn) {
+  return Promise.resolve().then(fn).catch(error => { $("connection").textContent = error.message; });
+}
+
+function makeTimeDisplay(zone) {
+  const timeZone = zone ?? undefined;
+  const full = new Intl.DateTimeFormat("en-US", {
+    timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return {
+    zone,
+    label: zone ?? `${full.resolvedOptions().timeZone} (browser)`,
+    journey: new Intl.DateTimeFormat("en-US", {
+      timeZone, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }),
+    full,
+  };
+}
+
+function readTimeDisplay() {
+  try {
+    return makeTimeDisplay(localStorage.getItem(timeZoneKey));
+  } catch {
+    return makeTimeDisplay(null);
+  }
+}
+
+function setTimeDisplay(zone) {
+  if (zone !== null && !/^[a-z][a-z0-9._+-]*(?:\/[a-z0-9._+-]+)*$/i.test(zone)) throw new RangeError();
+  const next = makeTimeDisplay(zone);
+  if (zone === null) localStorage.removeItem(timeZoneKey);
+  else localStorage.setItem(timeZoneKey, zone);
+  timeDisplay = next;
+}
+
+function editTimeZone() {
+  const form = node("form", undefined, "time-zone-form");
+  const label = node("label", "IANA time zone");
+  const input = node("input");
+  input.type = "text";
+  input.required = true;
+  input.value = timeDisplay.zone ?? "";
+  input.placeholder = "Asia/Seoul";
+  input.setAttribute("autocapitalize", "off");
+  label.append(input);
+  const save = node("button", "Save");
+  save.type = "submit";
+  const current = node("p", "Current time zone · " + timeDisplay.label, "meta");
+  const feedback = node("p", undefined, "meta");
+  feedback.setAttribute("role", "alert");
+  function apply(zone) {
+    try {
+      setTimeDisplay(zone);
+      closeJournalDialog();
+    } catch (error) {
+      feedback.textContent = error instanceof RangeError
+        ? "Enter an IANA time zone such as Asia/Seoul or UTC."
+        : "Could not save the time zone in this browser.";
+    }
+  }
+  form.onsubmit = event => { event.preventDefault(); apply(input.value.trim()); };
+  form.append(current, label, save, action("Use browser time zone", () => apply(null)), feedback);
+  modal("Time zone", form);
+  input.focus();
+}
+
 class JournalError extends Error {
   constructor(status, message) {
     super(message);
@@ -81,6 +149,7 @@ function modal(title, child, transcriptView = false) {
   detailRequest = null;
   delete $("modalTitle").dataset.priority;
   dialog.classList.toggle("transcript-detail", transcriptView);
+  $("close").hidden = !!activeNoteEditor;
   $("modalTitle").textContent = title;
   $("modalBody").replaceChildren(child);
   dialog.onkeydown = null;
@@ -140,7 +209,7 @@ async function transcript(project, r) {
   }
   const summary = pane("Turn explanation");
   const box = pane("Transcript");
-  summary.append(node("p", r.summary || "No explanation available."));
+  summary.append(wrapText(node("p"), r.summary || "No explanation available."));
   box.append(node("p", "Loading transcript…"));
   modal("Turn details", panes, true);
   summary.focus({ preventScroll: true });
@@ -160,13 +229,13 @@ async function transcript(project, r) {
     if (!box.isConnected || !$("detail").open) return;
     const items = Array.isArray(detail) ? detail : detail.items;
     if (detail.summary_detail) summary.replaceChildren(renderMarkdown(detail.summary_detail));
-    else if (detail.summary) summary.replaceChildren(node("p", detail.summary));
+    else if (detail.summary) summary.replaceChildren(wrapText(node("p"), detail.summary));
     box.replaceChildren();
     if (!items.length) box.append(node("p", "No transcript items."));
     function renderItems(start) {
       if (!box.isConnected || !$("detail").open) return;
       for (const item of items.slice(start, start + 8)) {
-        box.append(node("h2", item.type), node("pre", item.text ??
+        box.append(node("h2", item.type), wrapText(node("pre"), item.text ??
           (item.aggregatedOutput ? (item.command ?? "") + "\n" + item.aggregatedOutput :
             JSON.stringify(item, null, 2))));
       }
@@ -177,10 +246,42 @@ async function transcript(project, r) {
     if (box.isConnected && error.name !== "AbortError") box.textContent = error.message;
   }
 }
-function projectLink(k) {
-  const a = node("a", k);
+function projectLink(k, name = k) {
+  const a = node("a", name);
   a.href = "#" + encodeURIComponent(k);
   return a;
+}
+function newNoteSpace(kind, parent = null) {
+  const project = "~/" + crypto.randomUUID().replaceAll("-", "");
+  const form = node("form", undefined, "space-form");
+  const label = node("label", kind === "group" ? "Group name" : "Project name");
+  const name = node("input");
+  name.type = "text";
+  name.required = true;
+  name.maxLength = 120;
+  label.append(name);
+  const submit = node("button", "Create");
+  submit.type = "submit";
+  const feedback = node("p", undefined, "meta");
+  feedback.setAttribute("role", "status");
+  form.append(label, submit, feedback);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      await api("note-spaces", {}, { project, kind, name: name.value, parent });
+      if (form.isConnected) {
+        closeJournalDialog();
+        location.hash = encodeURIComponent(project);
+      }
+    } catch (error) {
+      feedback.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  modal(kind === "group" ? "New note group" : "New note project", form);
+  name.focus();
 }
 function noteView(project, note) {
   const el = node("div", undefined, "note");
@@ -190,8 +291,12 @@ function noteView(project, note) {
   open.dataset.axis = note.turn ? "1" : "2";
   open.dataset.identity = note.id;
   el.append(open);
-  const preview = note.preview ?? note.body;
-  if (preview?.trim().normalize("NFC") !== title)
+  const source = note.preview ?? note.body ?? "";
+  const heading = source.match(/^(?: {0,3}#{1,6}[ \t]+[^\r\n]+|[^\r\n]+\r?\n {0,3}(?:=+|-+)[ \t]*)(?:\r?\n|$)/)?.[0];
+  const preview = heading && markdownHeading(heading).normalize("NFC") === title
+    ? source.slice(heading.length).replace(/^(?:[ \t]*\r?\n)+/, "")
+    : source;
+  if (preview.trim() && preview.trim().normalize("NFC") !== title)
     el.append(node("div", preview, "note-excerpt"));
   el.append(action("Edit", () => editNote(project, {}, note), "small"));
   return el;
@@ -199,6 +304,12 @@ function noteView(project, note) {
 function overview(entries) {
   const out = node("div");
   for (const p of entries) {
+    if (p.kind) {
+      const section = node("article", undefined, "project");
+      section.append(projectLink(p.project, p.name), node("span", p.kind === "group" ? "Note group" : "Note project", "meta"));
+      out.append(section);
+      continue;
+    }
     const rows = p.turns;
     const section = node("article", undefined, "project"),
       left = node("div"),
@@ -238,8 +349,8 @@ function overview(entries) {
   return out;
 }
 
-function storageLink(project) {
-  const link = node("a", project || "Storage");
+function storageLink(project, name = project || "Storage") {
+  const link = node("a", name);
   link.href = project ? "#stats?" + new URLSearchParams({ project }) : "#stats";
   return link;
 }
@@ -297,14 +408,14 @@ function storageView(data, project) {
     metric.append(node("dt", label), node("dd", value));
     totals.append(metric);
   }
-  const date = (started) => started === null ? "–" : new Date(started * 1000).toLocaleString();
+  const date = (started) => started === null ? "–" : timeDisplay.full.format(started * 1000);
   out.append(
     totals,
     storageTable(
       project ? "Project usage" : "Storage by project",
       ["Project", "Turns", "Notes", "Record data", "Latest turn"],
       projects.map((row) => [
-        project ? projectLink(row.project) : storageLink(row.project),
+        project ? projectLink(row.project, row.name) : storageLink(row.project, row.name),
         row.turn_count.toLocaleString(),
         row.note_count.toLocaleString(),
         formatBytes(row.turn_bytes + row.note_bytes),
@@ -328,14 +439,10 @@ function storageView(data, project) {
 }
 
 const sessionColors = [
-  "#26754e",
-  "#425da9",
-  "#a14728",
-  "#7a4c98",
-  "#0e737a",
-  "#a13660",
-  "#816024",
-  "#496277",
+  "var(--session-1)",
+  "var(--session-2)",
+  "var(--session-3)",
+  "var(--session-4)",
 ];
 function sessionColor(thread) {
   let index = 0;
@@ -376,12 +483,12 @@ function graphGutter(row) {
   return graph;
 }
 
-function board(project, rows, notes) {
-  const cols = axes.filter((x) => visible.has(x)),
+function board(project, rows, notes, notesOnly) {
+  const cols = notesOnly ? [axes[2]] : axes.filter((x) => visible.has(x)),
     grid = node("div", undefined, "board");
   if (!cols.length) return node("p", "Select a column to show.", "empty");
-  const journeyVisible = visible.has("Journey");
-  const turnNotesVisible = visible.has("Turn notes");
+  const journeyVisible = cols.includes("Journey");
+  const turnNotesVisible = cols.includes("Turn notes");
   const paired = journeyVisible && turnNotesVisible;
   const hasGraph = journeyVisible && rows.length > 0;
   const recordsLayout = (paired ? " paired" : "") + (hasGraph ? " with-graph" : "");
@@ -401,11 +508,17 @@ function board(project, rows, notes) {
     scroll.dataset.pane = names.join("+");
     scroll.setAttribute("role", "region");
     scroll.setAttribute("aria-label", names.join(" and "));
+    if (names.some(name => name !== "Project notes")) {
+      scroll.setAttribute("aria-keyshortcuts", ["Shift+ArrowUp", "Shift+ArrowDown", "Shift+K", "Shift+J"].join(" "));
+    }
     for (const name of names) {
       const label = node("div", undefined, name === "Journey" && hasGraph ? "head journey-head" : "head");
       label.append(node("h2", name));
-      if (name === "Project notes")
-        label.append(action("＋", () => editNote(project), "small"));
+      if (name === "Project notes") {
+        const add = action("＋", () => editNote(project), "small");
+        add.setAttribute("aria-label", "Add project note");
+        label.append(add);
+      }
       head.append(label);
     }
     section.append(head, scroll);
@@ -414,7 +527,7 @@ function board(project, rows, notes) {
   }
   const recordAxes = cols.filter(name => name !== "Project notes");
   const records = recordAxes.length ? pane(recordAxes) : null;
-  const projectPane = visible.has("Project notes") ? pane(["Project notes"]) : null;
+  const projectPane = cols.includes("Project notes") ? pane(["Project notes"]) : null;
   if (records && projectPane) {
     grid.classList.add("with-project");
     grid.style.setProperty("--record-pane-width", paired ? "3fr" : journeyVisible ? "2fr" : "1fr");
@@ -450,6 +563,7 @@ function board(project, rows, notes) {
     if (!records) return;
     const card = node("article", undefined, "board-card" + recordsLayout);
     card.dataset.turn = r.turn;
+    card.dataset.thread = r.thread;
     if (journeyVisible) {
       card.dataset.session = r.thread;
       card.style.setProperty("--session-color", sessionColor(r.thread));
@@ -461,16 +575,13 @@ function board(project, rows, notes) {
       button.dataset.axis = "0";
       button.dataset.identity = JSON.stringify([r.thread, r.turn]);
       const meta = node("div", undefined, "meta");
-      const time = new Date(r.started * 1000).toLocaleString("en-US", {
-        month: "numeric",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+      const time = node("time", timeDisplay.journey.format(r.started * 1000));
+      time.dateTime = new Date(r.started * 1000).toISOString();
+      time.title = timeDisplay.full.format(r.started * 1000);
       const session = node("span", r.thread.slice(-6), "session-id");
       session.title = "Session " + r.thread;
       meta.append(
-        node("span", time),
+        time,
         node("span", statusLabel(r), statusLabel(r) === labels.inProgress ? "live" : ""),
       );
       if (r.parent && !seenSessions.has(r.thread)) {
@@ -543,6 +654,7 @@ const boardPrefix = "agent-journal:board:";
 let currentPage = null;
 let browserJump = null;
 let gPending = false;
+let sessionMovePending = false;
 
 function route() {
   const storage = isStorageRoute();
@@ -632,7 +744,7 @@ function applySessionFilter(thread, mode) {
     return;
   }
   const query = { ...pageQuery };
-  for (const key of ["thread", "before", "after", "edge"]) delete query[key];
+  for (const key of ["thread", "before", "after", "edge", "inclusive"]) delete query[key];
   if (scope) query.thread = scope;
   pageQuery = query;
   legacyNewerPages = [];
@@ -712,7 +824,7 @@ function makeSessionControls(project) {
 
 function renderView(target, data) {
   const { storage, project } = target;
-  const sig = JSON.stringify([target.key, [...visible], journeyFilter, noteEpoch, data.revision ?? data]);
+  const sig = JSON.stringify([target.key, [...visible], journeyFilter, noteEpoch, timeDisplay.zone, data.revision ?? data]);
   if (last === sig) return;
   last = sig;
   const sameProjectPage = currentPage?.project === project &&
@@ -727,9 +839,10 @@ function renderView(target, data) {
   $("view").hidden = false;
   $("crumb").replaceChildren();
   $("axes").replaceChildren();
-  $("title").textContent = project || (storage ? "Storage" : "Projects");
+  const name = data.space?.name ?? (storage && project ? data.projects[0]?.name : null);
+  $("title").textContent = name ?? (project || (storage ? "Storage" : "Projects"));
   const showSessionControls = visible.has("Journey") || (journeyFilter && visible.has("Turn notes"));
-  $("sessionFilters").hidden = storage || !project || !showSessionControls;
+  $("sessionFilters").hidden = storage || !project || !!data.space || !showSessionControls;
   if (!$("sessionFilters").hidden) {
     if (sessionControls?.project !== project) {
       sessionControls = makeSessionControls(project);
@@ -742,21 +855,25 @@ function renderView(target, data) {
     link.href = "#";
     $("crumb").append(link);
   }
+  if (data.space?.parent) $("crumb").append(projectLink(data.space.parent, data.space.parent_name));
   if (!storage || project) $("crumb").append(storageLink());
+  $("crumb").append(action("Time zone · " + timeDisplay.label, editTimeZone, "small"));
   if (storage) {
     $("axes").append(action("Refresh", refresh));
     $("content").replaceChildren(storageView(data, project));
     return;
   }
   if (!project) {
+    $("axes").append(action("New note project", () => newNoteSpace("project")), action("New note group", () => newNoteSpace("group")));
     $("content").replaceChildren(overview(data));
     return;
   }
-  for (const axis of axes) {
+  for (const axis of data.space ? [] : axes) {
     const label = node("label"), cb = node("input");
     cb.type = "checkbox";
     cb.checked = visible.has(axis);
     cb.onchange = () => {
+      if (!cb.checked && visible.size === 1) { cb.checked = true; return; }
       cb.checked ? visible.add(axis) : visible.delete(axis);
       renderView(target, data);
       [...$("axes").querySelectorAll("input")][axes.indexOf(axis)]?.focus();
@@ -773,7 +890,7 @@ function renderView(target, data) {
   if (target.query.before || target.query.after || target.query.edge === "first") {
     nav.append(action("Latest turns", () => paginate(0, "last")));
   }
-  if (visible.has(axes[2])) {
+  if (data.space || visible.has(axes[2])) {
     if (data.project_earlier) nav.append(
       action("Oldest project notes", () => paginate(2, "first")),
       action("Earlier project notes", () => paginate(2, "earlier")),
@@ -788,13 +905,32 @@ function renderView(target, data) {
     noteEpoch++;
     renderView(target, data);
   }));
-  $("content").replaceChildren(nav, board(project, data.turns, [...data.turn_notes, ...data.project_notes]));
+  const grid = board(project, data.turns, [...data.turn_notes, ...data.project_notes], !!data.space);
+  const sections = [];
+  if (!data.space && (visible.has(axes[0]) || visible.has(axes[1]))) {
+    const hint = node("p", undefined, "board-shortcuts meta");
+    hint.append(node("kbd", "Shift+↑/↓"), " or ", node("kbd", "K/J"), " Move within the session");
+    sections.push(hint);
+  }
+  if (data.space?.kind === "group") {
+    $("axes").append(action("New project in group", () => newNoteSpace("project", project)));
+    const children = data.space.children.map(child => projectLink(child.project, child.name));
+    if (children.length) {
+      const links = node("nav", undefined, "space-children");
+      links.setAttribute("aria-label", "Projects in this group");
+      links.append(...children);
+      sections.push(links);
+    }
+  }
+  $("content").replaceChildren(...sections, nav, grid);
   for (const pane of $("content").querySelectorAll("[data-pane]")) {
     if (oldScroll.has(pane.dataset.pane)) pane.scrollTop = oldScroll.get(pane.dataset.pane);
   }
   if (browserJump?.key === target.key) {
-    const items = axisItems(browserJump.axis);
-    items[browserJump.first ? 0 : items.length - 1]?.focus();
+    const { axis, first, turn } = browserJump;
+    const items = axisItems(axis);
+    if (turn) focusSessionTurn(axis, turn);
+    else items[first ? 0 : items.length - 1]?.focus();
     browserJump = null;
   } else if (selected != null && selectedAxis != null) {
     axisItems(Number(selectedAxis)).find(item => item.dataset.identity === selected)?.focus({ preventScroll: true });
@@ -842,7 +978,10 @@ function paginate(axis, direction) {
     return;
   const query = { ...pageQuery };
   for (const name of ["before", "after", "edge"]) delete query[prefix + name];
-  if (!projectNotes) legacyNewerPages = [];
+  if (!projectNotes) {
+    delete query.inclusive;
+    legacyNewerPages = [];
+  }
   if (direction === "earlier" || direction === "later") {
     const earlier = direction === "earlier";
     const row = entries[earlier ? 0 : entries.length - 1];
@@ -870,6 +1009,65 @@ function paginate(axis, direction) {
 
 function axisItems(axis) {
   return [...$("content").querySelectorAll(`[data-axis="${axis}"]`)];
+}
+
+function focusSessionTurn(axis, turn) {
+  axisItems(axis).find(item => {
+    const card = item.closest("[data-turn]");
+    return card?.dataset.thread === turn.thread && card.dataset.turn === turn.turn;
+  })?.focus();
+}
+
+async function stepSession(axis, step) {
+  const { data, project, key, query } = currentPage;
+  const anchor = data.turns.findIndex(row => row.thread === selectedTurn?.thread && row.turn === selectedTurn?.turn);
+  const origin = data.turns[anchor];
+  if (!origin) return;
+  const candidates = step < 0 ? data.turns.slice(0, anchor).reverse() : data.turns.slice(anchor + 1);
+  const next = candidates.find(row => row.thread === origin.thread);
+  if (next) {
+    focusSessionTurn(axis, next);
+    return;
+  }
+  const earlier = step < 0;
+  const direction = earlier ? "earlier" : "later";
+  const boundary = earlier ? "before" : "after";
+  const end = () => { $("connection").textContent = `No ${direction} turns in this session`; };
+  if (!data[direction]) { end(); return; }
+  if (data.legacy) throw new Error("This Journal server does not support session moves across pages");
+  if (sessionMovePending) return;
+  const trigger = document.activeElement;
+  sessionMovePending = true;
+  try {
+    const result = await api("board", {
+      project, ...query, ["session_" + boundary]: JSON.stringify([origin.started, origin.turn, origin.thread]),
+    });
+    const focus = document.activeElement;
+    if (route().key !== key || $("detail").open || activeAxis !== axis ||
+        (focus !== trigger && (!trigger.dataset.identity || focus?.dataset.identity !== trigger.dataset.identity ||
+          focus?.dataset.axis !== trigger.dataset.axis)) ||
+        selectedTurn?.thread !== origin.thread || selectedTurn?.turn !== origin.turn) return;
+    if (result.session_target === null) { end(); return; }
+    if (!result.session_target) throw new Error("This Journal server does not support session moves across pages");
+    const nextQuery = { ...query };
+    for (const name of ["before", "after", "edge"]) delete nextQuery[name];
+    pageQuery = { ...nextQuery, [boundary]: JSON.stringify(result.session_target), inclusive: "true" };
+    legacyNewerPages = [];
+    const target = route();
+    const [, turn, thread] = result.session_target;
+    browserJump = { key: target.key, axis, turn: { thread, turn } };
+    activeRequest?.controller.abort();
+    activeRequest = null;
+    version++;
+    rememberRead(target.key, result);
+    renderView(target, result);
+    $("connection").textContent = "Connected";
+  } catch (error) {
+    if (error.status === 404) throw new Error("This Journal server does not support session moves across pages");
+    throw error;
+  } finally {
+    sessionMovePending = false;
+  }
 }
 
 function moveBetweenAxes(element, direction) {
@@ -902,6 +1100,10 @@ function browseKeys(event) {
   if (event.target.matches("input, select, textarea, [contenteditable]")) return;
   if ($("detail").open) {
     if (activeNoteEditor) return;
+    if (!expandedTurnPane && ["1", "2"].includes(event.key)) {
+      const pane = $("detail").querySelectorAll(".turn-detail-pane")[Number(event.key) - 1];
+      if (pane) { event.preventDefault(); pane.querySelector("button").click(); return; }
+    }
     if (["j", "k", "d", "u", "g", "G"].includes(event.key)) {
       event.preventDefault();
       const dialog = $("turnPaneDetail").open ? $("turnPaneDetail") : $("detail");
@@ -921,20 +1123,72 @@ function browseKeys(event) {
     return;
   }
   if (!currentPage || !event.target.closest("main")) return;
+  const { data, ...target } = currentPage;
+  const { project } = target;
   if (event.target.dataset.axis != null) activeAxis = Number(event.target.dataset.axis);
   else if (event.target.dataset.pane && !event.target.dataset.pane.split("+").includes(axes[activeAxis]))
     activeAxis = axes.indexOf(event.target.dataset.pane.split("+")[0]);
-  if (/^[123]$/.test(event.key)) {
+  if (data.space) activeAxis = 2;
+  else if (/^[123]$/.test(event.key) || (event.key === "Escape" && focusedAxes)) {
     event.preventDefault();
-    activeAxis = Number(event.key) - 1;
-    visible.clear();
-    visible.add(axes[activeAxis]);
-    const { data, ...target } = currentPage;
+    if (event.key === "Escape") {
+      for (const axis of axes) visible.add(axis);
+      focusedAxes = false;
+    } else {
+      const index = Number(event.key) - 1;
+      const axis = axes[index];
+      if (!focusedAxes) {
+        visible.clear();
+        visible.add(axis);
+        focusedAxes = true;
+        activeAxis = index;
+      } else if (!visible.has(axis)) {
+        visible.add(axis);
+        activeAxis = index;
+      } else if (visible.size > 1) {
+        visible.delete(axis);
+        if (!visible.has(axes[activeAxis])) activeAxis = axes.indexOf(visible.values().next().value);
+      }
+    }
     renderView(target, data);
-    axisItems(activeAxis)[0]?.focus();
+    (axisItems(activeAxis)[0] ?? $("content").querySelector(`[data-pane*="${axes[activeAxis]}"]`))?.focus();
     return;
   }
-  if (!["h", "l", "j", "k", "d", "u", "g", "G"].includes(event.key) && !Object.hasOwn(pageKeys, event.key))
+  const sessionStep = { K: -1, J: 1 }[event.key] ??
+    (event.shiftKey ? { ArrowUp: -1, ArrowDown: 1 }[event.key] : undefined);
+  if ((sessionStep === 1 || sessionStep === -1) && activeAxis < 2) {
+    event.preventDefault();
+    gPending = false;
+    const axis = activeAxis;
+    runAction(() => stepSession(axis, sessionStep));
+    return;
+  }
+  if (["m", "n", "t", "e", "p", "X"].includes(event.key)) {
+    const row = data.turns.find(item => item.thread === selectedTurn?.thread && item.turn === selectedTurn?.turn) ?? data.turns.at(-1);
+    const id = event.target.dataset.identity;
+    if (event.key === "e") {
+      const notes = mergeDrafts(project, data.turns, [...data.turn_notes, ...data.project_notes]);
+      const note = notes.find(item => item.id === id)
+        ?? (activeAxis === 0 ? notes.find(item => item.thread === row?.thread && item.turn === row?.turn)
+          ?? notes.findLast(item => !item.turn) : null);
+      if (note) editNote(project, {}, note);
+    }
+    if (event.key === "n") editNote(project);
+    if (event.key === "m" && row) editNote(project, row);
+    if (event.key === "t" && row) transcript(project, row);
+    if (event.key === "p" && row) runAction(() => pasteNote(project, row));
+    if (event.key === "X" && noteCut?.project === project) {
+      noteCut = null;
+      noteEpoch++;
+      renderView(target, data);
+    }
+    event.preventDefault();
+    return;
+  }
+  const itemMoves = { j: 1, k: -1, ArrowDown: 1, ArrowUp: -1 };
+  const pageMoves = { d: 1, u: -1, PageDown: 2, PageUp: -2 };
+  if (!["h", "l", "g", "G"].includes(event.key) && !Object.hasOwn(itemMoves, event.key) &&
+      !Object.hasOwn(pageMoves, event.key) && !Object.hasOwn(pageKeys, event.key))
     return;
   event.preventDefault();
   if (event.key === "h" || event.key === "l") {
@@ -960,7 +1214,7 @@ function browseKeys(event) {
   const index = items.indexOf(document.activeElement);
   const pane = items[0]?.closest("[data-pane]");
   const half = Math.max(1, Math.floor((pane?.clientHeight ?? window.innerHeight) / 130));
-  const step = ({j: 1, k: -1, d: half, u: -half})[event.key];
+  const step = itemMoves[event.key] ?? half * pageMoves[event.key];
   items[Math.max(0, Math.min(items.length - 1, index + step))]?.focus();
 }
 
@@ -971,9 +1225,9 @@ $("turnPaneDetail").addEventListener("cancel", event => {
   event.preventDefault();
   closeTurnPane();
 });
-$("detail").addEventListener("cancel", () => {
+$("detail").addEventListener("cancel", event => {
+  if (activeNoteEditor) { event.preventDefault(); return; }
   detailRequest?.abort();
-  finishNoteEditing();
 });
 $("detail").addEventListener("close", () => {
   if ($("detail").open) return;
@@ -1003,24 +1257,46 @@ window.addEventListener("hashchange", () => {
   journeyFilter = null;
   sessionControls = null;
   browserJump = null;
+  selectedTurn = null;
+  if (focusedAxes) {
+    for (const axis of axes) visible.add(axis);
+    focusedAxes = false;
+  }
   last = "";
   if ($("detail").open) closeJournalDialog();
   refresh();
 });
 window.addEventListener("online", () => { pumpDrafts(); refresh(); });
+window.addEventListener("storage", event => {
+  if (event.key !== timeZoneKey && event.key !== null) return;
+  timeDisplay = readTimeDisplay();
+  refresh();
+});
 window.addEventListener("pagehide", () => {
   for (const draft of noteDrafts.values()) {
     if (draft.checkpoint) checkpointDraft(draft);
   }
 });
 document.addEventListener("keydown", browseKeys);
+$("content").addEventListener("focusin", event => {
+  const card = event.target.closest("[data-turn]");
+  if (card) selectedTurn = card.dataset;
+});
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 async function startJournal() {
   if (location.hash.startsWith("#login?")) {
     const params = new URLSearchParams(location.hash.slice("#login?".length));
     const project = params.get("project");
+    const zone = params.get("time_zone");
     history.replaceState(null, "", location.pathname + location.search +
       (project ? "#" + encodeURIComponent(project) : ""));
+    if (zone !== null) {
+      try {
+        setTimeDisplay(zone === "default" ? null : zone);
+      } catch {
+        // An unsupported zone or unavailable storage does not block sign-in.
+      }
+    }
     const code = params.get("code");
     if (code) {
       try {

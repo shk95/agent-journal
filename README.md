@@ -1,12 +1,14 @@
 # Agent Journal
 
-Agent Journal records Codex sessions from your registered GitHub repositories and syncs them through a central server. Use the terminal journal beside Codex or open the web journal in a browser.
+Agent Journal is a workspace for working with coding agents across sessions. It connects what happened during the work with what you decided, what you learned, and what you plan to do next. Use that context to review the agent's work and decide what to ask for or verify in the next session.
+
+Agent Journal currently records Codex sessions from your registered GitHub repositories and syncs them through a central server. Use the terminal journal beside Codex or open the web journal in a browser.
 
 ## What you can do
 
 - Follow requests, progress, and results in **Journey**, with a graph that connects concurrent and forked sessions.
 - Open a turn to read its explanation above the transcript. Expand either section for a larger view.
-- Keep Markdown notes on individual turns or on the project. Ask Codex to read the journal or attach a note to a specific turn.
+- Use Markdown turn notes to record why a decision was made and project notes to keep findings and plans across sessions. Ask Codex to read the journal or attach a note to a specific turn.
 - Choose **Basic**, **Contextual**, or **In-depth** explanations on each work machine and check the additional tokens they use.
 
 ## Get started
@@ -15,4 +17,6 @@ Agent Journal records Codex sessions from your registered GitHub repositories an
 2. Sign in to GitHub CLI and [trust the recording hooks in Codex](docs/SETUP.md#set-up-codex). Open a new Codex session in the repository and ask, “Register this repository with Agent Journal.” Register each repository once.
 3. Run `agent-journal` from the repository for the terminal client, or `agent-journal web` for the browser. In the terminal, use `Enter` to open a turn, `m` for a turn note, `n` for a project note, and `w` to open the project in the browser.
 
-Run `agent-journal explanation` to see the current quality, `agent-journal explanation In-depth` to change it, or `agent-journal explanation-usage` to see this machine's token usage. The default quality is **Contextual**. [Explanation settings](docs/SETUP.md#explanation-settings)
+Run `agent-journal explanation` to see the current quality, `agent-journal explanation In-depth` to change it, or `agent-journal explanation-usage` to see this machine's token usage. The default quality is **Contextual**. [Explanation settings](docs/CONFIGURATION.md#explanation-settings)
+
+[Setup and usage](docs/SETUP.md) · [Configuration](docs/CONFIGURATION.md) · [Server and release operations](docs/OPERATIONS.md) · [Development and testing](docs/DEVELOPMENT.md)

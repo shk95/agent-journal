@@ -178,11 +178,19 @@ class Api:
 def open_web(api, project="", *, print_url=False):
     import webbrowser
 
+    from .settings import display_zone, load_settings
+
     root = api.base + "/"
     url = root + ("#" + quote(project, safe="") if project else "")
+    params = {"project": project}
+    time_zone = load_settings(state_dir())["time_zone"]
+    if time_zone is not None:
+        display_zone(time_zone)
+        params["time_zone"] = time_zone
+        url = root + "#login?" + urlencode(params)
     if print_url:
         print(url, flush=True)
     with suppress(OSError, JournalHTTPError):
         code = api.request("browser-login", {})["code"]
-        url = root + "#login?" + urlencode({"code": code, "project": project})
+        url = root + "#login?" + urlencode({"code": code, **params})
     return webbrowser.open_new_tab(url)

@@ -9,6 +9,7 @@ from wcwidth import iter_graphemes, strip_sequences, wcswidth
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 MARKDOWN = MarkdownIt("commonmark", {"html": False})
 UNTITLED_NOTE = "Untitled note"
+WRAP_MARK = "↳ "
 
 
 @lru_cache(maxsize=1024)
@@ -57,25 +58,38 @@ def lines(text):
     yield text[start:]
 
 
-def wrap(text, width):
-    width = max(width, 1)
+def wrap(text, width, *, mark=False):
+    gutter = len(WRAP_MARK) if mark and width > len(WRAP_MARK) else 0
+    width = max(width - gutter, 1)
     for line in lines(text):
-        if line and line.isascii() and line.isprintable():
-            for i in range(0, len(line), width):
-                yield line[i : i + width]
-            continue
-        out = []
+        if not (line.isascii() and line.isprintable()):
+            line = display_text(line)
+        for start, end in wrapped_spans(line, width):
+            prefix = (WRAP_MARK if start else " " * gutter) if gutter else ""
+            yield prefix + fit(line[start:end], width)
+
+
+def wrapped_spans(line, width):
+    width = max(width, 1)
+    if not line:
+        yield 0, 0
+        return
+    start = 0
+    if line.isascii() and line.isprintable():
+        for start in range(0, len(line), width):
+            yield start, min(start + width, len(line))
+        return
+    while start < len(line):
         used = 0
-        for cluster, cells in display_clusters(line):
-            if cluster == "\t":
-                cells = 4 - used % 4
-                cluster = " " * cells
-            if used + cells > width and out:
-                yield "".join(out)
-                out, used = [], 0
-            out.append(cluster)
+        end = start
+        for cluster in iter_graphemes(line, start=start):
+            cells = 4 - used % 4 if cluster == "\t" else cell_width(cluster)
+            if used + cells > width and end > start:
+                break
+            end += len(cluster)
             used += cells
-        yield "".join(out)
+        yield start, end
+        start = end
 
 
 def heading_text(token):

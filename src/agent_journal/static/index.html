@@ -4,15 +4,31 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Agent Journal</title>
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/style.css" />
+    <script src="/vi.js" defer></script>
     <script src="/notes.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
     <header>
       <button id="home" class="brand" aria-label="All projects">
-        ◉ &nbsp;Agent Journal</button
-      ><span id="connection" role="status"></span>
+        <span class="brand-mark" aria-hidden="true">&gt;_</span> Agent Journal
+      </button>
+      <div class="header-controls">
+        <span id="connection" role="status"></span>
+        <div id="theme" class="theme-controls" role="group" aria-label="Theme">
+          <button type="button" data-preference="system" aria-label="System theme" title="System theme" aria-pressed="true">
+            <span class="theme-monitor" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-preference="light" aria-label="Light theme" title="Light theme" aria-pressed="false">
+            <span aria-hidden="true">☼</span>
+          </button>
+          <button type="button" data-preference="dark" aria-label="Dark theme" title="Dark theme" aria-pressed="false">
+            <span aria-hidden="true">☾</span>
+          </button>
+        </div>
+      </div>
     </header>
     <main>
       <section id="login" hidden>

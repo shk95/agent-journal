@@ -5,7 +5,7 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from textwrap import fill
@@ -89,16 +89,19 @@ def show_stats(api):
     if not data["projects"]:
         print("No registered projects.")
         return
+    from .settings import display_zone, load_settings
+
+    zone = display_zone(load_settings(state_dir())["time_zone"])
     width = max(len("Project"), max(len(row["project"]) for row in data["projects"]))
     print(
         f"{'Project':<{width}}  {'Turns':>8}  {'Notes':>8}"
-        f"  {'Record data':>11}  Latest turn (UTC)"
+        f"  {'Record data':>11}  Latest turn ({zone.key})"
     )
     for row in data["projects"]:
         latest = "–"
         if row["latest_turn_started"] is not None:
             latest = datetime.fromtimestamp(
-                row["latest_turn_started"], timezone.utc
+                row["latest_turn_started"], zone
             ).strftime("%Y-%m-%d %H:%M")
         size = format_bytes(row["turn_bytes"] + row["note_bytes"])
         print(
@@ -172,6 +175,8 @@ def main():
     explanation.add_argument("--measure-usage", choices=("on", "off"), help="record local explanation token counts")
     usage = commands.add_parser("explanation-usage", help="view local explanation token counts")
     usage.add_argument("--days", type=int, default=30)
+    time_zone = commands.add_parser("timezone", help="view or set this machine's display time zone")
+    time_zone.add_argument("zone", nargs="?", metavar="ZONE", help="an IANA name such as Asia/Seoul, or default")
     commands.add_parser("projects")
     commands.add_parser(
         "stats", help="show storage statistics for the connected Journal server"
@@ -219,6 +224,16 @@ def main():
             return
         if args.command == "explanation-usage":
             show_explanation_usage(state_dir(), args.days)
+            return
+        if args.command == "timezone":
+            from .settings import display_zone, load_settings, update_settings
+
+            root = state_dir()
+            settings = load_settings(root) if args.zone is None else update_settings(root, time_zone=args.zone)
+            configured = settings["time_zone"]
+            zone = display_zone(configured)
+            suffix = " (default)" if configured in (None, "default") else ""
+            print(f"Time zone · {zone.key}{suffix}")
             return
         if args.command == "setup-codex":
             from .codex_integration import setup_codex

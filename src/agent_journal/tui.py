@@ -10,14 +10,17 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from functools import partial
 from itertools import islice
 
 from .client_state import ClientState, background
 from .common import open_web, state_dir
 from .graph import layout
-from .settings import DEFAULT_EXPLANATION_QUALITY, load_settings
-from .text_layout import cell_width, fit, markdown_preview, note_title, wrap
-from .tui_editor import Editor, Keys, Paste, editor_line, line_start
+from .settings import DEFAULT_EXPLANATION_QUALITY, display_zone, load_settings
+from .text_layout import WRAP_MARK, cell_width, fit, markdown_preview, note_title, wrap
+from .tui_editor import Keys
+from .vi import HELP as VI_HELP, Editor, Paste, editor_row, editor_rows
 
 STATE = {
     "inProgress": "In progress",
@@ -34,6 +37,7 @@ AXES = ("Journey", "Turn notes", "Project notes")
 AXIS_KEYS = tuple(map(ord, "123"))
 MOVE = {ord("j"): 1, ord("k"): -1, curses.KEY_DOWN: 1, curses.KEY_UP: -1}
 PAGE_KEYS = {"[": "earlier", "]": "later", "<": "first", ">": "last"}
+SESSION_MOVES = {"K": -1, "J": 1, curses.KEY_SR: -1, curses.KEY_SF: 1}
 NOTE_PRIORITIES = {
     "highlighted": ("Highlighted", "★ ", curses.A_BOLD),
     "normal": ("Normal", "", 0),
@@ -100,6 +104,7 @@ class Item(TextPane):
     summary_focused: bool = True
     pane_rows: tuple[int, int] = (0, 0)
     expanded: "Item | None" = None
+    started: float | None = None
 
 
 def write(win, y, x, text, width, style=0):
@@ -569,6 +574,9 @@ def draw_board(
         if focused
         else "1–3 open an axis · h/l axes · j/k move · Enter open · m/n add notes · q quit"
     )
+    if view.active in (0, 1):
+        hint = "Shift+↑/↓ or K/J same session" if w >= 43 else "K/J same session"
+        help_text = hint + " · " + help_text
     write(win, h - 1, 0, message or help_text, w - 1)
     return maps
 
@@ -615,7 +623,7 @@ def detail_lines(item, width, height):
     if item.width != width:
         item.width = width
         item.lines = []
-        item.wrapping = wrap(item.content, width)
+        item.wrapping = wrap(item.content, width, mark=True)
     if item.wrapping is not None:
         count = min(180, max(0, item.offset + height + 4 - len(item.lines)))
         if item.bottom:
@@ -645,45 +653,81 @@ def draw_item_actions(window, options, hits):
 def draw_editor(window, item, status, hits):
     editor = item.editor
     h, w = window.getmaxyx()
-    label_y = draw_item_actions(window, [("Close", curses.KEY_EXIT), ("Save", 19), ("Preview", 16)], hits)
+    label_y = draw_item_actions(window, [("Save", 19), ("Preview", 16)], hits)
     start = label_y + 1
     height = h - start - 1
     cursor = None
+    if editor.help_offset is not None:
+        write(window, label_y, 0, "Editor keys · j/k scroll · Esc back", w - 1, curses.A_BOLD)
+        rows = list(wrap("\n\n".join(VI_HELP), w - 1))
+        editor.help_offset = min(editor.help_offset, max(0, len(rows) - height))
+        for y, line in enumerate(rows[editor.help_offset:editor.help_offset + height], start):
+            write(window, y, 0, line, w - 1)
+        return None
     split = editor.preview and w >= 86
     source_width = w // 2 - 2 if split else w - 1
+    gutter = len(WRAP_MARK)
+    editor.width = source_width - gutter
     if editor.preview:
         left = source_width + 3 if split else 0
         preview_width = w - left - 1
         write(window, label_y, left, "Markdown preview", preview_width, curses.A_DIM)
-        for y, line in enumerate(islice(wrap(item.preview, preview_width), height), start):
+        for y, line in enumerate(islice(wrap(item.preview, preview_width, mark=True), height), start):
             write(window, y, left, line, preview_width)
     if not editor.preview or split:
-        write(window, label_y, 0, "Markdown · # Title", source_width, curses.A_DIM)
+        write(window, label_y, 0, "Markdown · # Title · ↳ wrap", source_width, curses.A_DIM)
         text = editor.note["body"]
-        source = text.split("\n")
-        row = text.count("\n", 0, editor.position)
+        source = editor_rows(text, editor.width)
+        _, selection = editor.selection()
+        row = editor_row(source, editor.position)
         editor.top = max(0, row - height + 1, min(editor.top, row))
         for i in range(editor.top, min(len(source), editor.top + height)):
             y = start + i - editor.top
+            offset, line, continuation = source[i]
+            if continuation:
+                write(window, y, 0, WRAP_MARK, gutter, curses.A_DIM)
+            write(window, y, gutter, line, editor.width)
+            end = source[i + 1][0] if i + 1 < len(source) else len(text)
+            for a, b in selection:
+                if a >= end:
+                    break
+                if b <= offset or a == b:
+                    continue
+                left = cell_width(fit(text[offset:max(a, offset)], editor.width))
+                right = cell_width(fit(text[offset:min(b, end)], editor.width))
+                if left < right:
+                    try:
+                        window.chgat(y, gutter + left, right - left, curses.A_REVERSE)
+                    except curses.error:
+                        pass
             if i == row:
-                col = editor.position - line_start(text, editor.position)
-                line, x = editor_line(source[i], col, source_width)
-                write(window, y, 0, line, source_width)
-                cursor = y, x
-            else:
-                write(window, y, 0, source[i], source_width)
-    footer = (
-        item.message or editor.command
-        or f"{editor.mode} · {status} · :w save · ^P preview"
+                prefix = fit(text[offset:editor.position], editor.width)
+                cursor = y, gutter + min(cell_width(prefix), editor.width - 1)
+    state_text = f"{editor.mode} · {status}"
+    if editor.recording:
+        state_text += f" · Recording @{editor.recording}"
+    if editor.pending:
+        state_text += " · " + "".join(editor.pending)
+    footer = item.message or editor.command or (
+        state_text + " · " + (editor.message or ":q close · :q! discard · :w save · :help keys · ^P preview")
     )
     write(window, h - 1, 0, footer, w - 1)
+    if editor.command:
+        cursor = h - 1, min(w - 2, cell_width(editor.command))
     return cursor
 
 
-def draw_item(window, view, item, status, *, expanded=False):
+def draw_item(window, view, item, status, *, expanded=False, time_zone=timezone.utc):
     h, w = window.getmaxyx()
     hits = {}
-    write(window, 0, 0, axis_path(view, w - 1), w - 1, curses.A_DIM)
+    path_width = w - 1
+    if item.started is not None:
+        date = datetime.fromtimestamp(item.started, time_zone)
+        stamp = date.strftime("%Y-%m-%d %H:%M %Z" if w >= 55 else "%m-%d %H:%M %Z")
+        width = cell_width(stamp)
+        path_width = max(0, path_width - width - 2)
+        write(window, 0, w - 1 - width, stamp, width, curses.A_DIM)
+    write(window, 0, 0, axis_path(view, path_width), path_width, curses.A_DIM)
     heading = item.context or item.title
     if item.confirm:
         heading = f"Delete note · {item.title}"
@@ -694,7 +738,7 @@ def draw_item(window, view, item, status, *, expanded=False):
         label_y = draw_item_actions(window, [("Keep draft", ord("l")), ("Use server", ord("s"))], hits)
         write(window, label_y, 0, "Server · " + note_title(item.server_note), w - 1, curses.A_BOLD)
         start = label_y + 1
-        for y, line in enumerate(islice(wrap(item.server_note["body"], w - 1), h - start - 1), start):
+        for y, line in enumerate(islice(wrap(item.server_note["body"], w - 1, mark=True), h - start - 1), start):
             write(window, y, 0, line, w - 1)
         write(window, h - 1, 0, "Local draft preserved · l keep draft · s use server · Esc back", w - 1)
         return hits, None
@@ -786,8 +830,10 @@ class Terminal:
         self.item = self.board_job = self.detail_job = self.preview_job = self.mutation = None
         self.detail_request = None
         self.web_job = None
+        self.session_jump = None
         self.settings_root = state_dir()
         self.explanation_quality = DEFAULT_EXPLANATION_QUALITY
+        self.time_zone = display_zone()
         self.settings_refresh = 0
         self.cut = None
         self.pages = OrderedDict()
@@ -837,11 +883,17 @@ class Terminal:
         if when >= self.settings_refresh:
             self.settings_refresh = when + 1
             try:
-                quality = load_settings(self.settings_root)["explanation_quality"]
+                settings = load_settings(self.settings_root)
+                quality = settings["explanation_quality"]
+                zone = display_zone(settings["time_zone"])
             except (OSError, ValueError):
                 quality = DEFAULT_EXPLANATION_QUALITY
+                zone = display_zone()
             if quality != self.explanation_quality:
                 self.explanation_quality = quality
+                redraw = True
+            if zone != self.time_zone:
+                self.time_zone = zone
                 redraw = True
         if self.web_job is not None and self.web_job.done():
             try:
@@ -867,6 +919,10 @@ class Terminal:
                     self.pages[key] = data
                     self.last_read[key] = when
                     self.refresh_after[key] = when + (15 if data.get("later") else 3)
+            redraw = True
+
+        if self.session_jump is not None and self.session_jump[0].done():
+            self.finish_session_jump()
             redraw = True
 
         key, data = self.page(self.view.query)
@@ -1010,9 +1066,12 @@ class Terminal:
         return data, turns, graph, turn_notes, project_notes
 
     def draw_header(self, win, width):
-        label = f"Explanation quality · {self.explanation_quality}"
+        zone = self.time_zone.key
+        label = f"Time zone · {zone}  |  Explanation quality · {self.explanation_quality}"
         if width - cell_width(label) < 12:
-            label = self.explanation_quality
+            label = f"{zone} · {self.explanation_quality}"
+        if width - cell_width(label) < 8:
+            label = fit(zone, max(0, width - 8))
         position = width - cell_width(label) - 1
         write(win, 0, 0, self.project, position - 2, curses.A_BOLD)
         write(win, 0, position, label, cell_width(label), curses.A_DIM)
@@ -1057,7 +1116,9 @@ class Terminal:
                     break
                 window = panel(win, level)
                 status = self.state.status(item.note["id"]) if item.note else ""
-                hits, cursor = draw_item(window, self.view, item, status, expanded=item is expanded)
+                hits, cursor = draw_item(
+                    window, self.view, item, status, expanded=item is expanded, time_zone=self.time_zone,
+                )
                 y, x = window.getbegyx()
                 self.item_hit = (y, x, window.getmaxyx(), hits)
                 if cursor is not None:
@@ -1077,7 +1138,7 @@ class Terminal:
         cached = self.details.get(key) if row.get("revision") is not None else None
         summary, transcript = cached or (row.get("summary") or "No explanation available.", "Loading transcript…")
         self.item = Item(
-            title, content=transcript, loading=cached is None, summary=TextPane(content=summary)
+            title, content=transcript, loading=cached is None, summary=TextPane(content=summary), started=row.get("started"),
         )
         if cached is None:
             self.request_detail(key, False, transcript_text, self.api, self.project, row)
@@ -1137,13 +1198,19 @@ class Terminal:
         self.item.preview_due = time.monotonic() + 0.14
         return True
 
-    def close_item(self):
+    def close_item(self, *, discard=False):
         if self.item.expanded is not None:
             self.item.expanded = None
             self.prefix = ""
             return
         if self.item.editor and self.item.note["id"] in self.state.drafts:
-            if not self.save(immediate=True):
+            if discard:
+                try:
+                    self.state.discard(self.item.note["id"])
+                except OSError as error:
+                    self.item.message = f"Local draft could not be discarded · {error}"
+                    return
+            elif not self.save(immediate=True):
                 return
         self.item = None
         self.detail_request = None
@@ -1177,8 +1244,11 @@ class Terminal:
     def detail_key(self, key):
         item = self.item.expanded or self.item
         if key == curses.KEY_EXIT:
-            self.close_item()
-            return
+            if item.editor:
+                key = "\x1b"
+            else:
+                self.close_item()
+                return
         if item.confirm:
             item.confirm = ""
             if key == "y":
@@ -1200,22 +1270,19 @@ class Terminal:
                 item.preview_due = time.monotonic()
             return
         if item.editor:
-            if key == "\x1b" and item.editor.mode == "Normal" and not item.editor.command:
-                self.close_item()
-                return
-            if key == "\x12" and self.state.drafts.get(item.note["id"], {}).get("conflict"):
+            result = item.editor.input(key)
+            if result == "review" and self.state.drafts.get(item.note["id"], {}).get("conflict"):
                 note = item.note.copy()
                 self.request_detail((note["id"], "server"), False, self.state.detail, note)
                 item.message = "Loading server version · local draft preserved"
                 return
-            result = item.editor.input(key)
             if result == "change":
                 self.save()
             elif result in ("save", "save-close"):
                 if self.save(immediate=True) and result == "save-close":
                     self.item = None
-            elif result == "close":
-                self.close_item()
+            elif result in ("close", "discard-close"):
+                self.close_item(discard=result == "discard-close")
             return
         if item.choosing_priority:
             item.choosing_priority = False
@@ -1228,7 +1295,7 @@ class Terminal:
             if key in ("1", "2"):
                 item.summary_focused = key == "1"
             title = "Turn explanation" if item.summary_focused else "Transcript"
-            item.expanded = Item(title)
+            item.expanded = Item(title, started=item.started)
             self.prefix = ""
             return
         if key in ("\x1b", "\n", "\r"):
@@ -1293,6 +1360,8 @@ class Terminal:
         before = self.view.query.get("before", data.get("legacy_before"))
         for name in ("before", "after", "edge"):
             self.view.query.pop(prefix + name, None)
+        if not project:
+            self.view.query.pop("inclusive", None)
         if paging:
             earlier = position == "earlier"
             if not project and (data.get("legacy") or self.state.modern is False):
@@ -1340,6 +1409,60 @@ class Terminal:
         elif axis == 0 and turns:
             self.view.turn = turn_key(turns[index])
 
+    def step_session(self, step, row, data, turns, turn_notes):
+        index = turns.index(row)
+        candidates = reversed(turns[:index]) if step < 0 else turns[index + 1 :]
+        target = next((turn for turn in candidates if turn["thread"] == row["thread"]), None)
+        if target is not None:
+            self.select_session_turn(turn_key(target), turn_notes)
+            return
+        direction = "earlier" if step < 0 else "later"
+        if not data.get(direction):
+            self.message = f"No {direction} turns in this session"
+        elif self.state.modern is False:
+            self.message = "This Journal server does not support session moves across pages"
+        elif self.session_jump is None:
+            boundary = "before" if step < 0 else "after"
+            query = self.view.query.copy()
+            params = query | {
+                "session_" + boundary: page_cursor(row, ("started", "turn", "thread")),
+            }
+            job = background(partial(self.api.request, "board", project=self.project, **params))
+            self.session_jump = job, self.view, query, turn_key(row), self.view.active, boundary
+
+    def finish_session_jump(self):
+        job, view, query, origin, axis, boundary = self.session_jump
+        self.session_jump = None
+        if self.item or self.view is not view or view.query != query or view.turn != origin or view.active != axis:
+            return
+        try:
+            data = job.result()
+        except (OSError, RuntimeError) as error:
+            self.message = str(error)
+            return
+        if "session_target" not in data:
+            self.message = "This Journal server does not support session moves across pages"
+            return
+        anchor = data["session_target"]
+        if anchor is None:
+            direction = "earlier" if boundary == "before" else "later"
+            self.message = f"No {direction} turns in this session"
+            return
+        view.query = {key: value for key, value in query.items() if key not in ("before", "after", "edge")}
+        view.query.update({boundary: json.dumps(anchor, separators=(",", ":")), "inclusive": "true"})
+        key, _ = self.page(view.query)
+        self.pages[key] = data
+        self.jump_when_ready = None
+        _, _, _, turn_notes, _ = self.data(view)
+        self.select_session_turn((anchor[2], anchor[1]), turn_notes)
+
+    def select_session_turn(self, key, turn_notes):
+        self.message = ""
+        if self.view.active == 1:
+            select_turn_note(self.view, (key, note_in(turn_notes.get(key, []), None)))
+        else:
+            self.view.turn = key
+
     def list_key(self, key, clicked=None):
         data, turns, _, turn_notes, project_notes = self.data(self.view)
         if key == "q":
@@ -1376,6 +1499,13 @@ class Terminal:
             return True
         axis = self.view.active
         selected = next((row for row in turns if turn_key(row) == self.view.turn), None)
+        step = SESSION_MOVES.get(key)
+        if step is None and isinstance(key, int) and key >= curses.KEY_MIN:
+            step = {b"kUP": -1, b"kDN": 1}.get(curses.keyname(key))
+        if step and axis in (0, 1) and selected:
+            self.prefix = ""
+            self.step_session(step, selected, data, turns, turn_notes)
+            return True
         if key == "g" and self.prefix != "g":
             self.prefix = "g"
             return True
@@ -1607,6 +1737,7 @@ def run(api, project, *, mouse=True):
             os.environ["TERM"] = "xterm-256color"
         editor_tty = tty.copy()
         editor_tty[0] &= ~termios.IXON
+        editor_tty[3] &= ~termios.IEXTEN
         termios.tcsetattr(sys.stdin, termios.TCSANOW, editor_tty)
         curses.wrapper(show, api, project, mouse)
     except curses.error as exc:

@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -35,12 +36,19 @@ CREATE TABLE IF NOT EXISTS notes(
     thread TEXT, turn TEXT, body TEXT NOT NULL, created REAL NOT NULL,
     FOREIGN KEY(project,thread,turn) REFERENCES turns(project,thread,turn)
 );
+CREATE TABLE IF NOT EXISTS note_spaces(
+    project TEXT PRIMARY KEY REFERENCES projects(project),
+    name TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('project','group')),
+    parent TEXT REFERENCES note_spaces(project), CHECK(kind='project' OR parent IS NULL)
+);
+CREATE INDEX IF NOT EXISTS note_spaces_by_parent ON note_spaces(parent,name,project);
 """
 STATIC = Path(__file__).parent / "static"
 SERVER_VERSION = version("agent-journal")
 BROWSER_LOGIN_TTL = 60
 BROWSER_SESSION_MAX_AGE = 365 * 24 * 60 * 60
 STORAGE_WINDOW_DAYS = 30
+NOTE_SPACE = re.compile(r"~/[a-f0-9]{32}")
 
 
 def connect(path):
@@ -137,9 +145,34 @@ def board_page(db, project, args):
     edge = args.get("edge")
     thread = args.get("thread")
     thread_params = (thread,) if thread else ()
-    inclusive = False
+    inclusive = args.get("inclusive") == "true"
     turn_args = dict(args, lanes="true", limit=BOARD_PAGE_SIZE + 1)
-    if edge in ("first-note", "last-note"):
+    session_target = None
+    if args.get("session_before") and args.get("session_after"):
+        raise ValueError("Choose one direction for session navigation")
+    direction = "before" if args.get("session_before") else "after" if args.get("session_after") else None
+    if direction:
+        started, turn, session = cursor_arg(args["session_" + direction], 3)
+        if not isinstance(started, (int, float)) or not isinstance(turn, str) or not isinstance(session, str):
+            raise ValueError("Invalid session cursor")
+        if thread and thread != session:
+            raise ValueError("The selected turn is outside the session filter")
+        operator, order = ("<", "DESC") if direction == "before" else (">", "ASC")
+        target = db.execute(
+            f"""SELECT started,turn,thread FROM turns WHERE project=? AND thread=?
+                AND (started,turn){operator}(?,?) ORDER BY started {order}, turn {order} LIMIT 1""",
+            (project, session, started, turn),
+        ).fetchone()
+        if target is None:
+            return {"session_target": None}
+        session_target = list(target)
+        turn_args.pop("before", None)
+        turn_args.pop("after", None)
+        turn_args.pop("edge", None)
+        turn_args[direction] = json.dumps(session_target)
+        inclusive = True
+    elif edge in ("first-note", "last-note"):
+        inclusive = False
         order = "ASC" if edge == "first-note" else "DESC"
         target = db.execute(
             f"""SELECT t.started, t.turn, t.thread FROM notes AS n
@@ -155,7 +188,7 @@ def board_page(db, project, args):
             turn_args["after" if edge == "first-note" else "before"] = json.dumps(list(target))
             inclusive = True
     turns = journey(db, project, turn_args, board=True, inclusive=inclusive)
-    forward = bool(turn_args.get("after") or edge == "first")
+    forward = bool(turn_args.get("after") or turn_args.get("edge") == "first")
     turns = turns[:BOARD_PAGE_SIZE] if forward else turns[-BOARD_PAGE_SIZE:]
 
     def has_turn(operator, row):
@@ -212,6 +245,18 @@ def board_page(db, project, args):
         "project_earlier": bool(project_notes) and has_project_note("<", project_notes[0]),
         "project_later": bool(project_notes) and has_project_note(">", project_notes[-1]),
     }
+    if session_target:
+        data["session_target"] = session_target
+    if NOTE_SPACE.fullmatch(project):
+        data["space"] = dict(db.execute(
+            """SELECT s.name,s.kind,s.parent,p.name AS parent_name FROM note_spaces AS s
+               LEFT JOIN note_spaces AS p ON s.parent=p.project WHERE s.project=?""",
+            (project,),
+        ).fetchone())
+        if data["space"]["kind"] == "group":
+            data["space"]["children"] = listing(
+                db, "SELECT project,name FROM note_spaces WHERE parent=? ORDER BY name,project", (project,)
+            )
     revision = hashlib.sha256(json.dumps(data, ensure_ascii=False).encode("utf-8")).hexdigest()
     if args.get("revision") == revision:
         return {"revision": revision, "unchanged": True}
@@ -244,7 +289,7 @@ def note_text(args, *, require_text=False, limit=40_000):
 
 
 def overview(db):
-    projects = listing(db, "SELECT project,active FROM projects ORDER BY project")
+    projects = listing(db, "SELECT project,active FROM projects WHERE project NOT LIKE '~/%' ORDER BY project")
     now = time.time()
     for project in projects:
         key = project["project"]
@@ -257,7 +302,34 @@ def overview(db):
             (key, now - OBSERVATION_LEASE),
         )
         project["turns"] = with_observation(running) or journey(db, key, {"limit": 1})
-    return projects
+    spaces = listing(
+        db, "SELECT project,name,kind FROM note_spaces WHERE parent IS NULL ORDER BY name,project"
+    )
+    for space in spaces:
+        space.update(active=0, turns=[])
+    return projects + spaces
+
+
+def create_note_space(db, args):
+    project, name, kind = args["project"], args["name"].strip(), args["kind"]
+    parent = args.get("parent")
+    if not NOTE_SPACE.fullmatch(project) or kind not in ("project", "group"):
+        raise ValueError("Invalid note space")
+    if not 1 <= len(name) <= 120 or len(name.splitlines()) != 1 or re.search(r"[\x00-\x1f\x7f-\x9f]", name):
+        raise ValueError("Enter a project or group name of up to 120 characters")
+    if parent is not None:
+        if kind != "project" or not isinstance(parent, str) or not db.execute(
+            "SELECT 1 FROM note_spaces WHERE project=? AND kind='group'", (parent,)
+        ).fetchone():
+            raise ValueError("Choose an existing note group")
+    existing = db.execute("SELECT name,kind,parent FROM note_spaces WHERE project=?", (project,)).fetchone()
+    if existing:
+        if tuple(existing) != (name, kind, parent):
+            raise Conflict("This note space already exists")
+    else:
+        db.execute("INSERT INTO projects VALUES (?,0,0)", (project,))
+        db.execute("INSERT INTO note_spaces VALUES (?,?,?,?)", (project, name, kind, parent))
+    return {"project": project}
 
 
 def storage_stats(db, project=None):
@@ -278,7 +350,7 @@ def storage_stats(db, project=None):
                 SELECT project, COUNT(*) AS note_count, SUM(body_bytes) AS note_bytes
                 FROM notes INDEXED BY note_storage {where} GROUP BY project
             )
-            SELECT project, COALESCE(turn_count, 0) AS turn_count,
+            SELECT project, note_spaces.name AS name, COALESCE(turn_count, 0) AS turn_count,
                    COALESCE(turn_bytes, 0) AS turn_bytes, latest_turn_started,
                    COALESCE(note_count, 0) AS note_count,
                    COALESCE(note_bytes, 0) AS note_bytes,
@@ -286,11 +358,15 @@ def storage_stats(db, project=None):
                    COALESCE(recent_bytes, 0) AS recent_bytes
             FROM projects LEFT JOIN turn_totals USING (project)
                           LEFT JOIN note_totals USING (project)
+                          LEFT JOIN note_spaces USING (project)
             {where} ORDER BY project""",
         (cutoff, now, cutoff, now, *scope, *scope, *scope),
     )
     if project and not projects:
         raise KeyError("Project not found")
+    for row in projects:
+        if row["name"] is None:
+            del row["name"]
     largest = listing(
         db,
         f"""WITH largest AS (
@@ -324,14 +400,23 @@ def storage_stats(db, project=None):
 
 def endpoint(db, method, path, args):
     if method == "GET" and path == "projects":
-        return listing(db, "SELECT * FROM projects ORDER BY project")
+        return listing(db, "SELECT * FROM projects WHERE project NOT LIKE '~/%' ORDER BY project")
+    if method == "POST" and path == "note-spaces":
+        return create_note_space(db, args)
     if method == "GET" and path == "overview":
         return overview(db)
     if method == "GET" and path == "stats" and "project" not in args:
         return storage_stats(db)
     project = args.get("project", "")
-    if not isinstance(project, str) or not PROJECT.fullmatch(project):
+    if not isinstance(project, str) or not (PROJECT.fullmatch(project) or NOTE_SPACE.fullmatch(project)):
         raise ValueError("Invalid project")
+    if NOTE_SPACE.fullmatch(project):
+        if path not in {"board", "note", "notes", "edit-note", "set-note-priority", "delete-note", "stats"}:
+            raise ValueError("This project supports notes only")
+        if not db.execute("SELECT 1 FROM note_spaces WHERE project=?", (project,)).fetchone():
+            raise KeyError("Note space not found")
+        if path == "notes" and (args.get("thread") or args.get("turn")):
+            raise ValueError("Notes in this space cannot target a turn")
     if method == "GET" and path == "stats":
         return storage_stats(db, project)
     if method == "POST" and path == "register":
@@ -555,6 +640,10 @@ class JournalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def browser_authenticated(self, cookie, session):
+        name = self.server.browser_cookie
+        return name in cookie and secrets.compare_digest(cookie[name].value.encode(), session.encode())
+
     def dispatch(self):
         url = urlsplit(self.path)
         if self.command == "GET" and url.path == "/internal/deployment":
@@ -579,9 +668,11 @@ class JournalHandler(BaseHTTPRequestHandler):
         files = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            "/vi.js": ("vi.js", "text/javascript; charset=utf-8"),
             "/notes.js": ("notes.js", "text/javascript; charset=utf-8"),
             "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
             "/style.css": ("style.css", "text/css"),
+            "/theme.js": ("theme.js", "application/javascript"),
         }
         if self.command == "GET" and url.path in files:
             name, mime = files[url.path]
@@ -597,12 +688,7 @@ class JournalHandler(BaseHTTPRequestHandler):
         bearer = secrets.compare_digest(
             header.encode(), ("Bearer " + token).encode()
         )
-        authenticated = bearer or (
-            cookie_name in cookie
-            and secrets.compare_digest(
-                cookie[cookie_name].value.encode(), session.encode()
-            )
-        )
+        authenticated = bearer or self.browser_authenticated(cookie, session)
         issue_login = url.path == "/api/browser-login" and self.command == "POST"
         if (issue_login and not bearer) or (not login and not authenticated):
             return self.reply(401, {"error": "Authentication required"})
@@ -698,7 +784,7 @@ class JournalHandler(BaseHTTPRequestHandler):
 
 def make_server(
     host, port, database, token, *, deployment_id=None, maintenance_file=None,
-    deployment_probe_key=None,
+    deployment_probe_key=None, handler=JournalHandler,
 ):
     if not token:
         raise ValueError("Set AGENT_JOURNAL_TOKEN first")
@@ -758,7 +844,7 @@ def make_server(
                 "CREATE INDEX IF NOT EXISTS project_notes_order "
                 "ON notes(project,created,id) WHERE turn IS NULL"
             )
-    server = ThreadingHTTPServer((host, port), JournalHandler)
+    server = ThreadingHTTPServer((host, port), handler)
     server.token, server.database = token, database
     server.deployment_probe_key = deployment_probe_key
     server.browser_cookie = "journal"
